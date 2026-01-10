@@ -1,0 +1,24 @@
+version: '3'
+
+services:
+  web:
+    container_name: bbgi
+    build: .
+    restart: always
+    command: ["uwsgi", "--ini", "/code/uwsgi.ini"]
+    env_file: .env
+    environment:
+      - VIRTUAL_PORT=8060
+      - TIMEOUT=300
+      - HTTP_PORT=8060
+      - STATS_PORT=8051
+      - LANG=C.UTF-8
+      - LANG=en_US.UTF-8
+      - LANGUAGE=en_US:en
+      - LC_ALL=en_US.UTF-8
+    volumes:
+      - .:/code
+      - ./media:/code/media
+      - ./static:/code/static
+    ports:
+      - "8060:8060"
