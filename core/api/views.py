@@ -401,136 +401,151 @@ class MainReport(APIView):
 class CustomerList(APIView):
 
     def get(self, request):
+        params = {}
+        where = []
+
         cursor = get_connection()
-        
-        selected_branches = request.query_params.getlist('selectedBranches')
-        entered_text = request.query_params.get('enteredText')
-        customer_id = request.query_params.get('customer_id')
-        min_created_at = request.GET.get('minCreatedAtSelected')
-        max_created_at = request.GET.get('maxCreatedAtSelected')
-        order_created_at = request.GET.get('orderCreatedAt')
-        selected_first_name = request.GET.get('first_name')
-        selected_last_name = request.GET.get('last_name')
-        selected_father_name = request.GET.get('father_name')
-        pin = request.GET.get('pin')
-        customs_number = request.GET.get('customsnumber')
-        name = request.GET.get('name')
-        min_date_selected = request.GET.get('minDateSelected',None)
-        max_date_selected = request.GET.get('maxDateSelected',None)
-        pg_size = request.query_params.get('pg_size', 10)
-        pg_num = request.query_params.get('pg_num', 1)
-        is_risk = request.GET.get('is_risk')
 
-        query = """
-            select dc.first_name, dc.last_name, dc.father_name, dc.birth_date, dc.pin, dc.phone, dc.visits_count  as visits, dc.id as customer_id,dc.created_at,
-            COALESCE(vrf.is_risk, false) as is_risk, vrf.note as note
-            from stat.dim_visit dv 
-            left join stat.dim_customer dc on dc.id::varchar = dv.custom_1 
-            left join stat.fact_visit_transaction  fvt on fvt.visit_key = dv.id 
-            left join stat.dim_branch db on db.id = fvt.branch_key
-            left join visits_risk_fin vrf on vrf.fin = dc.pin
-            where dc.id is not null
-        
-        """
-        count_query = """
-            SELECT COUNT(*) AS sum
-            FROM (
-                SELECT dc.first_name, dc.last_name, dc.pin
-                FROM stat.dim_visit dv 
-                LEFT JOIN stat.dim_customer dc ON dc.id::varchar = dv.custom_1 
-                LEFT JOIN stat.fact_visit_transaction  fvt on fvt.visit_key = dv.id 
-                LEFT JOIN stat.dim_branch db ON db.id = fvt.branch_key
-                where dc.id is not null
-        """
+        # ---- filters ----
+        if request.GET.get('first_name'):
+            where.append("dc.first_name ILIKE %(first_name)s")
+            params['first_name'] = f"%{request.GET['first_name']}%"
 
-        if selected_first_name:
-                query += f"AND dc.first_name ilike '%{selected_first_name}%'"
-                count_query += f"AND dc.first_name ilike '%{selected_first_name}%'"
+        if request.GET.get('last_name'):
+            where.append("dc.last_name ILIKE %(last_name)s")
+            params['last_name'] = f"%{request.GET['last_name']}%"
 
-        if selected_last_name:
-                query += f"AND dc.last_name ilike '%{selected_last_name}%'"
-                count_query += f"AND dc.last_name ilike '%{selected_last_name}%'"
+        if request.GET.get('father_name'):
+            where.append("dc.father_name ILIKE %(father_name)s")
+            params['father_name'] = f"%{request.GET['father_name']}%"
 
-        if selected_father_name:
-                query += f"AND dc.father_name ilike '%{selected_father_name}%'"
-                count_query += f"AND dc.father_name ilike '%{selected_father_name}%'"
-                
-        if customer_id:
-            query += f"and dc.id = {customer_id} "
-            count_query += f"and dc.id = {customer_id} "
+        if request.GET.get('pin'):
+            where.append("dc.pin ILIKE %(pin)s")
+            params['pin'] = f"%{request.GET['pin']}%"
 
-        if selected_branches:
-            query += f"AND db.id in ({','.join(selected_branches)}) "
-            count_query += f"AND db.id IN ({','.join(selected_branches)}) "
+        if request.GET.get('customer_id'):
+            where.append("dc.id = %(customer_id)s")
+            params['customer_id'] = request.GET['customer_id']
 
+        branches = request.GET.getlist('selectedBranches')
+        if branches:
+            where.append("db.id = ANY(%(branches)s)")
+            params['branches'] = list(map(int, branches))
+
+        entered_text = request.GET.get('enteredText')
         if entered_text:
-            query += f"and (lower(dc.first_name) like lower('%{entered_text}%') or lower(dc.last_name) like lower('%{entered_text}%') or lower(dc.pin) like lower('%{entered_text}%')) "
-            count_query += f"and (lower(dc.first_name) like lower('%{entered_text}%') or lower(dc.last_name) like lower('%{entered_text}%') or lower(dc.pin) like lower('%{entered_text}%'))"
+            where.append("""
+                        (
+                            dc.first_name ILIKE %(q)s OR
+                            dc.last_name ILIKE %(q)s OR
+                            dc.pin ILIKE %(q)s
+                        )
+                    """)
+            params['q'] = f"%{entered_text}%"
 
-        if pin:
-            query += f"AND dc.pin ilike '%{pin}%'"
-            count_query += f"AND dc.pin ilike '%{pin}%'"
+        if request.GET.get('minCreatedAtSelected') and request.GET.get('maxCreatedAtSelected'):
+            where.append("dc.created_at BETWEEN %(min_created)s AND %(max_created)s")
+            params['min_created'] = request.GET['minCreatedAtSelected'] + " 00:00:00"
+            params['max_created'] = request.GET['maxCreatedAtSelected'] + " 23:59:59"
 
-        if name:
-            query += f"AND ds.name ilike '%{name}%'"
-            count_query += f"AND ds.name ilike '%{name}%'"
+        if request.GET.get('minDateSelected') and request.GET.get('maxDateSelected'):
+            where.append("dc.birth_date BETWEEN %(min_birth)s AND %(max_birth)s")
+            params['min_birth'] = request.GET['minDateSelected']
+            params['max_birth'] = request.GET['maxDateSelected']
 
-        if customs_number:
-            customs_filter = f"""AND EXISTS (
-                SELECT 1 
-                FROM visits_declaration vd 
-                WHERE vd.visit_id = dv.origin_id::varchar 
-                AND vd.customs_number ILIKE '%{customs_number}%'
-            )"""
-            query += customs_filter
-            count_query += customs_filter
+        if request.GET.get('customsnumber'):
+            where.append("""
+                        EXISTS (
+                            SELECT 1
+                            FROM visits_declaration vd
+                            WHERE vd.visit_id = dv.origin_id::varchar
+                              AND vd.customs_number ILIKE %(customs)s
+                        )
+                    """)
+            params['customs'] = f"%{request.GET['customsnumber']}%"
 
+        # ---- new filter for risk pins ----
+        if request.GET.get('riskPins') == 'true':
+            where.append("vrf.is_risk = %(risk_pins)s")
+            params['risk_pins'] = True
 
-        if min_date_selected and max_date_selected:
-            query += f"AND dc.birth_date >= '{min_date_selected}' AND dc.birth_date <= '{max_date_selected}'"
-            count_query += f"AND dc.birth_date >= '{min_date_selected}' AND dc.birth_date <= '{max_date_selected}'"
+        where_sql = " AND ".join(where)
+        if where_sql:
+            where_sql = "AND " + where_sql
 
-        if min_created_at and max_created_at:
-            query += f"AND dc.created_at >= '{min_created_at} 00:00:00' AND dc.created_at <= '{max_created_at} 23:59:59'"
-            count_query += f"AND dc.created_at >= '{min_created_at} 00:00:00' AND dc.created_at <= '{max_created_at} 23:59:59'"
-        
-        order = "asc"
-        if order_created_at == 'asc' or order_created_at == 'desc':
-            order = order_created_at
+        order = request.GET.get('orderCreatedAt', 'desc')
+        order = order if order in ('asc', 'desc') else 'desc'
 
-        if is_risk == 'true':
-            query += " AND vrf.is_risk = true "
-            count_query += " AND vrf.is_risk = true "
-        elif is_risk == 'false':
-            query += " AND COALESCE(vrf.is_risk, false) = false "
-            count_query += " AND COALESCE(vrf.is_risk, false) = false "
+        pg_size = int(request.GET.get('pg_size', 10))
+        pg_num = int(request.GET.get('pg_num', 1))
+        offset = (pg_num - 1) * pg_size
 
-        query += f"group by custom_1,dc.first_name,dc.last_name, dc.father_name, dc.birth_date,dc.pin, dc.phone, dc.visits_count, dc.id,dc.created_at, vrf.is_risk, vrf.note order by dc.created_at {order} OFFSET {pg_size} * ({pg_num} - 1) LIMIT {pg_size};"
+        # ---- main query ----
+        query = f"""
+            SELECT *
+            FROM (
+                SELECT DISTINCT ON (dc.id)
+                    dc.id               AS customer_id,
+                    dc.first_name,
+                    dc.last_name,
+                    dc.father_name,
+                    dc.birth_date,
+                    dc.pin,
+                    dc.phone,
+                    dc.visits_count     AS visits,
+                    dc.created_at,
+                    COALESCE(vrf.is_risk, false) AS is_risk,
+                    vrf.note
+                FROM stat.dim_visit dv
+                JOIN stat.dim_customer dc
+                    ON dc.id::varchar = dv.custom_1
+                LEFT JOIN stat.fact_visit_transaction fvt
+                    ON fvt.visit_key = dv.id
+                LEFT JOIN stat.dim_branch db
+                    ON db.id = fvt.branch_key
+                LEFT JOIN visits_risk_fin vrf
+                    ON vrf.fin = dc.pin
+                WHERE dc.id IS NOT NULL
+                {where_sql}
+                ORDER BY dc.id, dc.created_at DESC
+            ) t
+            ORDER BY t.created_at {order}
+            LIMIT %(limit)s OFFSET %(offset)s
+        """
 
-        cursor.execute(query)
+        # ---- count query ----
+        count_query = f"""
+                            SELECT COUNT(DISTINCT dc.id)
+                            FROM stat.dim_visit dv
+                            JOIN stat.dim_customer dc
+                                ON dc.id::varchar = dv.custom_1
+                            LEFT JOIN stat.fact_visit_transaction fvt
+                                ON fvt.visit_key = dv.id
+                            LEFT JOIN stat.dim_branch db
+                                ON db.id = fvt.branch_key
+                            LEFT JOIN visits_risk_fin vrf
+                                ON vrf.fin = dc.pin
+                            WHERE dc.id IS NOT NULL
+                            {where_sql}
+                        """
+
+        params.update({
+            'limit': pg_size,
+            'offset': offset
+        })
+
+        cursor.execute(query, params)
         data = convert_data(cursor)
-        result = CustomerAllSerializer(data,many = True).data
-        
-       
-        count_query +=  """
-                GROUP BY custom_1, dc.first_name, dc.last_name, dc.father_name, dc.birth_date,dc.pin, dc.visits_count, dc.id,dc.created_at
-                ORDER BY dc.first_name
-            ) AS subquery
-            ;  
-            """
+        result = CustomerAllSerializer(data, many=True).data
 
 
-        cursor.execute(count_query)
-        count = cursor.fetchall()
-    
+        cursor.execute(count_query, params)
+        total = cursor.fetchone()[0]
 
-        extract_integer = lambda x: x[0] if isinstance(x, tuple) else x
-        all = {"data": result ,"count":extract_integer(count[0])}
-        cursor.close()
-
-        return Response(all)
-
-
+        return Response({
+            "data": result,
+            "count": total
+        })
 
 
 class VisitListOfCustomer(APIView):
