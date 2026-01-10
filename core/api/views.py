@@ -397,44 +397,44 @@ class MainReport(APIView):
             return Response({"error": str(e)}, status=500)
 
 
-
 class CustomerList(APIView):
 
     def get(self, request):
         params = {}
-        where = []
+        inner_where = []
+        outer_where = []
 
         cursor = get_connection()
 
-        # ---- filters ----
+        # ---- filters (Inner Query) ----
         if request.GET.get('first_name'):
-            where.append("dc.first_name ILIKE %(first_name)s")
+            inner_where.append("dc.first_name ILIKE %(first_name)s")
             params['first_name'] = f"%{request.GET['first_name']}%"
 
         if request.GET.get('last_name'):
-            where.append("dc.last_name ILIKE %(last_name)s")
+            inner_where.append("dc.last_name ILIKE %(last_name)s")
             params['last_name'] = f"%{request.GET['last_name']}%"
 
         if request.GET.get('father_name'):
-            where.append("dc.father_name ILIKE %(father_name)s")
+            inner_where.append("dc.father_name ILIKE %(father_name)s")
             params['father_name'] = f"%{request.GET['father_name']}%"
 
         if request.GET.get('pin'):
-            where.append("dc.pin ILIKE %(pin)s")
+            inner_where.append("dc.pin ILIKE %(pin)s")
             params['pin'] = f"%{request.GET['pin']}%"
 
         if request.GET.get('customer_id'):
-            where.append("dc.id = %(customer_id)s")
+            inner_where.append("dc.id = %(customer_id)s")
             params['customer_id'] = request.GET['customer_id']
 
         branches = request.GET.getlist('selectedBranches')
         if branches:
-            where.append("db.id = ANY(%(branches)s)")
+            inner_where.append("db.id = ANY(%(branches)s")
             params['branches'] = list(map(int, branches))
 
         entered_text = request.GET.get('enteredText')
         if entered_text:
-            where.append("""
+            inner_where.append("""
                         (
                             dc.first_name ILIKE %(q)s OR
                             dc.last_name ILIKE %(q)s OR
@@ -444,17 +444,17 @@ class CustomerList(APIView):
             params['q'] = f"%{entered_text}%"
 
         if request.GET.get('minCreatedAtSelected') and request.GET.get('maxCreatedAtSelected'):
-            where.append("dc.created_at BETWEEN %(min_created)s AND %(max_created)s")
+            inner_where.append("dc.created_at BETWEEN %(min_created)s AND %(max_created)s")
             params['min_created'] = request.GET['minCreatedAtSelected'] + " 00:00:00"
             params['max_created'] = request.GET['maxCreatedAtSelected'] + " 23:59:59"
 
         if request.GET.get('minDateSelected') and request.GET.get('maxDateSelected'):
-            where.append("dc.birth_date BETWEEN %(min_birth)s AND %(max_birth)s")
+            inner_where.append("dc.birth_date BETWEEN %(min_birth)s AND %(max_birth)s")
             params['min_birth'] = request.GET['minDateSelected']
             params['max_birth'] = request.GET['maxDateSelected']
 
         if request.GET.get('customsnumber'):
-            where.append("""
+            inner_where.append("""
                         EXISTS (
                             SELECT 1
                             FROM visits_declaration vd
@@ -464,17 +464,44 @@ class CustomerList(APIView):
                     """)
             params['customs'] = f"%{request.GET['customsnumber']}%"
 
-        # ---- new filter for risk pins ----
         if request.GET.get('riskPins') == 'true':
-            where.append("vrf.is_risk = %(risk_pins)s")
+            inner_where.append("vrf.is_risk = %(risk_pins)s")
             params['risk_pins'] = True
 
-        where_sql = " AND ".join(where)
-        if where_sql:
-            where_sql = "AND " + where_sql
+        # ---- filters (Outer Query) ----
+        if request.GET.get('minLastVisitedSelected') and request.GET.get('maxLastVisitedSelected'):
+            outer_where.append("t.last_visited_at BETWEEN %(min_last_visited)s AND %(max_last_visited)s")
+            params['min_last_visited'] = request.GET['minLastVisitedSelected'] + " 00:00:00"
+            params['max_last_visited'] = request.GET['maxLastVisitedSelected'] + " 23:59:59"
+        elif request.GET.get('minLastVisitedSelected'):
+            outer_where.append("t.last_visited_at >= %(min_last_visited)s")
+            params['min_last_visited'] = request.GET['minLastVisitedSelected'] + " 00:00:00"
+        elif request.GET.get('maxLastVisitedSelected'):
+            outer_where.append("t.last_visited_at <= %(max_last_visited)s")
+            params['max_last_visited'] = request.GET['maxLastVisitedSelected'] + " 23:59:59"
 
-        order = request.GET.get('orderCreatedAt', 'desc')
-        order = order if order in ('asc', 'desc') else 'desc'
+        # Constructing SQL strings
+        inner_where_sql = " AND ".join(inner_where)
+        if inner_where_sql:
+            inner_where_sql = "AND " + inner_where_sql
+
+        outer_where_sql = " AND ".join(outer_where)
+        if outer_where_sql:
+            outer_where_sql = "WHERE " + outer_where_sql
+
+        # Order Logic
+        order_dir = request.GET.get('orderCreatedAt', 'desc')
+        order_dir = order_dir if order_dir in ('asc', 'desc') else 'desc'
+
+        order_column = "t.created_at"
+
+        if request.GET.get('orderLastVisited'):
+            order_column = "t.last_visited_at"
+            if request.GET.get('orderLastVisited') in ('asc', 'desc'):
+                order_dir = request.GET.get('orderLastVisited')
+        elif request.GET.get('orderCreatedAt'):
+            if request.GET.get('orderCreatedAt') in ('asc', 'desc'):
+                order_dir = request.GET.get('orderCreatedAt')
 
         pg_size = int(request.GET.get('pg_size', 10))
         pg_num = int(request.GET.get('pg_num', 1))
@@ -495,7 +522,8 @@ class CustomerList(APIView):
                     dc.visits_count     AS visits,
                     dc.created_at,
                     COALESCE(vrf.is_risk, false) AS is_risk,
-                    vrf.note
+                    vrf.note,
+                    to_timestamp(dv.created_timestamp / 1000.0) AS last_visited_at
                 FROM stat.dim_visit dv
                 JOIN stat.dim_customer dc
                     ON dc.id::varchar = dv.custom_1
@@ -506,28 +534,39 @@ class CustomerList(APIView):
                 LEFT JOIN visits_risk_fin vrf
                     ON vrf.fin = dc.pin
                 WHERE dc.id IS NOT NULL
-                {where_sql}
-                ORDER BY dc.id, dc.created_at DESC
+                {inner_where_sql}
+                ORDER BY dc.id, dv.created_timestamp DESC
             ) t
-            ORDER BY t.created_at {order}
+            {outer_where_sql}
+            ORDER BY {order_column} {order_dir}
             LIMIT %(limit)s OFFSET %(offset)s
         """
 
         # ---- count query ----
         count_query = f"""
-                            SELECT COUNT(DISTINCT dc.id)
-                            FROM stat.dim_visit dv
-                            JOIN stat.dim_customer dc
-                                ON dc.id::varchar = dv.custom_1
-                            LEFT JOIN stat.fact_visit_transaction fvt
-                                ON fvt.visit_key = dv.id
-                            LEFT JOIN stat.dim_branch db
-                                ON db.id = fvt.branch_key
-                            LEFT JOIN visits_risk_fin vrf
-                                ON vrf.fin = dc.pin
-                            WHERE dc.id IS NOT NULL
-                            {where_sql}
-                        """
+            SELECT COUNT(*) FROM (
+                SELECT 1
+                FROM (
+                    SELECT DISTINCT ON (dc.id)
+                        dc.id,
+                        dc.created_at,
+                        to_timestamp(dv.created_timestamp / 1000.0) AS last_visited_at
+                    FROM stat.dim_visit dv
+                    JOIN stat.dim_customer dc
+                        ON dc.id::varchar = dv.custom_1
+                    LEFT JOIN stat.fact_visit_transaction fvt
+                        ON fvt.visit_key = dv.id
+                    LEFT JOIN stat.dim_branch db
+                        ON db.id = fvt.branch_key
+                    LEFT JOIN visits_risk_fin vrf
+                        ON vrf.fin = dc.pin
+                    WHERE dc.id IS NOT NULL
+                    {inner_where_sql}
+                    ORDER BY dc.id, dv.created_timestamp DESC
+                ) t
+                {outer_where_sql}
+            ) sub
+        """
 
         params.update({
             'limit': pg_size,
@@ -538,7 +577,6 @@ class CustomerList(APIView):
         data = convert_data(cursor)
         result = CustomerAllSerializer(data, many=True).data
 
-
         cursor.execute(count_query, params)
         total = cursor.fetchone()[0]
 
@@ -546,7 +584,6 @@ class CustomerList(APIView):
             "data": result,
             "count": total
         })
-
 
 class VisitListOfCustomer(APIView):
 

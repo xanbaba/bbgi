@@ -191,46 +191,52 @@ class CustomerAllSerializer(serializers.Serializer):
     first_name = serializers.CharField(max_length=100)
     last_name = serializers.CharField(max_length=100)
     father_name = serializers.CharField(max_length=255)
-    birth_date = serializers.SerializerMethodField()  
+    birth_date = serializers.SerializerMethodField()
     pin = serializers.CharField(max_length=10)
     phone = serializers.CharField(max_length=20, allow_null=True, required=False)
-    id = serializers.IntegerField(source = 'customer_id')
-    count = serializers.IntegerField(source = 'visits')
+    id = serializers.IntegerField(source='customer_id')
+    count = serializers.IntegerField(source='visits')
     created_at = serializers.DateTimeField(format=time_format)
+    # ADDED: last_visited field
+    last_visited = serializers.DateTimeField(source='last_visited_at', format=time_format, allow_null=True,
+                                             required=False)
     is_risk = serializers.BooleanField(default=False)
     risk_note = serializers.CharField(source='note', allow_null=True, required=False)
-    
-    def get_birth_date(self,obj):
+
+    def get_birth_date(self, obj):
         converted_date = obj['birth_date']
         if not obj['birth_date']:
             return None
         try:
-            converted_date = datetime.strptime(converted_date,birth_date_format).strftime('%d-%m-%Y')
+            converted_date = datetime.strptime(converted_date, birth_date_format).strftime('%d-%m-%Y')
             return converted_date
         except Exception as e:
-            print('Format error: ',e)
+            print('Format error: ', e)
             return obj['birth_date']
-    
+
+
 class CustomerAllExportSerializer(serializers.Serializer):
     first_name = serializers.CharField(max_length=100)
     last_name = serializers.CharField(max_length=100)
     father_name = serializers.CharField(max_length=255)
-    birth_date = serializers.SerializerMethodField()  
-    fin = serializers.CharField(max_length=10,source = 'pin')
-    visit_count = serializers.IntegerField(source = 'visits')
+    birth_date = serializers.SerializerMethodField()
+    fin = serializers.CharField(max_length=10, source='pin')
+    visit_count = serializers.IntegerField(source='visits')
     created_at = serializers.DateTimeField()
+    # ADDED: last_visited field for export
+    last_visited = serializers.DateTimeField(source='last_visited_at', allow_null=True, required=False)
 
-    def get_birth_date(self,obj):
+    def get_birth_date(self, obj):
         converted_date = obj['birth_date']
         if not obj['birth_date']:
             return None
         try:
-            converted_date = datetime.strptime(converted_date,birth_date_format).strftime('%d-%m-%Y')
+            converted_date = datetime.strptime(converted_date, birth_date_format).strftime('%d-%m-%Y')
             return converted_date
         except Exception as e:
-            print('Format error: ',e)
+            print('Format error: ', e)
             return obj['birth_date']
-        
+
     def to_representation(self, instance):
         original_data = super().to_representation(instance)
         azerbaijani_data = {
@@ -240,9 +246,10 @@ class CustomerAllExportSerializer(serializers.Serializer):
             "Doğum tarixi": original_data["birth_date"],
             "FİN": original_data["fin"],
             "Visit sayı": original_data["visit_count"],
+            # ADDED: Export mapping
+            "Son ziyarət": original_data.get("last_visited"),
         }
         return azerbaijani_data
-
 
 class VisitExportSerializer(serializers.Serializer):
     first_name = serializers.CharField(max_length=100)
