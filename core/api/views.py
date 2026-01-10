@@ -419,6 +419,7 @@ class CustomerList(APIView):
         max_date_selected = request.GET.get('maxDateSelected',None)
         pg_size = request.query_params.get('pg_size', 10)
         pg_num = request.query_params.get('pg_num', 1)
+        is_risk = request.GET.get('is_risk')
 
         query = """
             select dc.first_name, dc.last_name, dc.father_name, dc.birth_date, dc.pin, dc.phone, dc.visits_count  as visits, dc.id as customer_id,dc.created_at,
@@ -496,7 +497,14 @@ class CustomerList(APIView):
         order = "asc"
         if order_created_at == 'asc' or order_created_at == 'desc':
             order = order_created_at
-            
+
+        if is_risk == 'true':
+            query += " AND vrf.is_risk = true "
+            count_query += " AND vrf.is_risk = true "
+        elif is_risk == 'false':
+            query += " AND COALESCE(vrf.is_risk, false) = false "
+            count_query += " AND COALESCE(vrf.is_risk, false) = false "
+
         query += f"group by custom_1,dc.first_name,dc.last_name, dc.father_name, dc.birth_date,dc.pin, dc.phone, dc.visits_count, dc.id,dc.created_at, vrf.is_risk, vrf.note order by dc.created_at {order} OFFSET {pg_size} * ({pg_num} - 1) LIMIT {pg_size};"
 
         cursor.execute(query)
