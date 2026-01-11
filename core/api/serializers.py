@@ -226,6 +226,22 @@ class CustomerAllExportSerializer(serializers.Serializer):
     # ADDED: last_visited field for export
     last_visited = serializers.DateTimeField(source='last_visited_at', allow_null=True, required=False)
 
+    COLUMN_MAPPING = {
+        'first_name': 'Ad',
+        'last_name': 'Soyad',
+        'father_name': 'Ata adı',
+        'birth_date': 'Doğum tarixi',
+        'fin': 'FİN',
+        'pin': 'FİN',  # alias
+        'visit_count': 'Visit sayı',
+        'visits': 'Visit sayı',  # alias
+        'last_visited': 'Son ziyarət',
+    }
+
+    def __init__(self, *args, selected_columns=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.selected_columns = selected_columns
+
     def get_birth_date(self, obj):
         converted_date = obj['birth_date']
         if not obj['birth_date']:
@@ -249,6 +265,21 @@ class CustomerAllExportSerializer(serializers.Serializer):
             # ADDED: Export mapping
             "Son ziyarət": original_data.get("last_visited"),
         }
+
+        if self.selected_columns:
+            selected_az_columns = [
+                self.COLUMN_MAPPING.get(col)
+                for col in self.selected_columns
+                if col in self.COLUMN_MAPPING
+            ]
+
+            if selected_az_columns:
+                azerbaijani_data = {
+                    key: value
+                    for key, value in azerbaijani_data.items()
+                    if key in selected_az_columns
+                }
+
         return azerbaijani_data
 
 class VisitExportSerializer(serializers.Serializer):
