@@ -236,11 +236,12 @@ class CustomerAllExportSerializer(serializers.Serializer):
         'visit_count': 'Visit sayı',
         'visits': 'Visit sayı',  # alias
         'last_visited': 'Son ziyarət',
+        'created_at': 'Yaradılma tarixi'
     }
 
-    def __init__(self, *args, selected_columns=None, **kwargs):
+    def __init__(self, *args, selected_columns: list | None =None, **kwargs):
         super().__init__(*args, **kwargs)
-        self.selected_columns = selected_columns
+        self.selected_columns = [col for col in selected_columns if col]
 
     def get_birth_date(self, obj):
         converted_date = obj['birth_date']
@@ -256,30 +257,10 @@ class CustomerAllExportSerializer(serializers.Serializer):
     def to_representation(self, instance):
         original_data = super().to_representation(instance)
         azerbaijani_data = {
-            "Ad": original_data["first_name"],
-            "Soyad": original_data["last_name"],
-            "Ata adı": original_data["father_name"],
-            "Doğum tarixi": original_data["birth_date"],
-            "FİN": original_data["fin"],
-            "Visit sayı": original_data["visit_count"],
-            # ADDED: Export mapping
-            "Son ziyarət": original_data.get("last_visited"),
+            self.COLUMN_MAPPING[col]: original_data[col]
+            for col in self.COLUMN_MAPPING
+            if (col in original_data) and ((self.selected_columns and col in self.selected_columns) or (not self.selected_columns))
         }
-
-        if self.selected_columns:
-            selected_az_columns = [
-                self.COLUMN_MAPPING.get(col)
-                for col in self.selected_columns
-                if col in self.COLUMN_MAPPING
-            ]
-
-            if selected_az_columns:
-                azerbaijani_data = {
-                    key: value
-                    for key, value in azerbaijani_data.items()
-                    if key in selected_az_columns
-                }
-
         return azerbaijani_data
 
 class VisitExportSerializer(serializers.Serializer):
