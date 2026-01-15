@@ -590,9 +590,18 @@ class VisitListOfCustomer(APIView):
         selected_father_name = request.GET.get('father_name')
         entered_text = request.query_params.get('enteredText')
 
+        # New filter parameters for declaration fields
+        declaration = request.query_params.get('declaration')
+        representation = request.query_params.get('representation')
+        representative_name = request.query_params.get('representative_name')
+        representative_voen = request.query_params.get('representative_voen')
+        represented_party_name = request.query_params.get('represented_party_name')
+        represented_party_voen = request.query_params.get('represented_party_voen')
+
         # Get customer profile with phone, birth_date and image from visits_visit
         profile_query = f"""
             SELECT 
+                dc.id,
                 dc.first_name, 
                 dc.last_name, 
                 dc.pin, 
@@ -618,8 +627,11 @@ class VisitListOfCustomer(APIView):
                      SELECT dv.origin_id::varchar FROM dim_visit dv 
                      WHERE dv.custom_1 = '{selected_customer}' 
                      ORDER BY dv.created_timestamp DESC LIMIT 1
-                 ) ORDER BY vv.id LIMIT 1) as image
+                 ) ORDER BY vv.id LIMIT 1) as image,
+                COALESCE(vrf.is_risk, false) as is_risk,
+                vrf.note as risk_note
             FROM stat.dim_customer AS dc
+            LEFT JOIN visits_risk_fin vrf ON vrf.fin = dc.pin
             WHERE dc.id = %s
         """
         cursor = get_connection()
@@ -641,110 +653,243 @@ class VisitListOfCustomer(APIView):
         pg_size = request.query_params.get('pg_size', 10)
         pg_num = request.query_params.get('pg_num', 1)
 
+        # Updated query with all missing fields
         query = f"""
-                SELECT 
-                    dv.id AS visit_key,
-                    dv.origin_id AS visit_origin_id,
-                    COUNT(fvt.id) AS transactions_count,
-                    dc.first_name, dc.last_name, dc.pin,
+            SELECT 
+                dv.id AS visit_key,
+                dv.origin_id AS visit_origin_id,
+                COUNT(fvt.id) AS transactions_count,
+                dc.first_name, 
+                dc.last_name, 
+                dc.pin,
                 dv.ticket_id,
                 dv.created_timestamp,
-                sum(fvt.transaction_time) as total_transaction_time, 
-                    sum(fvt.waiting_time) as total_wait_time,
-                (SELECT s_ds.name FROM fact_visit_transaction s_fvt
-                INNER JOIN dim_service AS s_ds ON s_ds.id = s_fvt.service_key
-                WHERE s_fvt.visit_key = dv.id
-                    ORDER BY create_timestamp LIMIT 1) 
-                    AS service_name,
-                (SELECT vn.status FROM visits_note vn
-                WHERE vn.visit_id = dv.id::varchar 
-                    AND vn.action = 'finish'
-                    ORDER BY vn.created_at ASC LIMIT 1) 
-                    AS result,
-                (SELECT dvet.name FROM fact_visit_transaction s_fvt
-                LEFT JOIN fact_visit_events s_fve ON s_fve.visit_transaction_id = s_fvt.id
-                LEFT JOIN dim_visit_event_type dvet ON dvet.id = s_fve.visit_event_type_key
-                WHERE s_fvt.visit_key = dv.id
-                    ORDER BY s_fvt.create_timestamp DESC LIMIT 1) 
-                    AS status
-                FROM 
-                    dim_visit dv
-                left join fact_visit_transaction fvt ON dv.id = fvt.visit_key
-                left join stat.dim_customer dc on dc.id::varchar = dv.custom_1
-                where dv.custom_1 is not null
+                -- Added: formatted date for display
+                TO_CHAR(TO_TIMESTAMP(dv.created_timestamp / 1000), 'DD.MM.YYYY HH24:MI') AS created_date,
 
+                SUM(fvt.transaction_time) AS total_transaction_time, 
+                SUM(fvt.waiting_time) AS total_wait_time,
+
+                TO_CHAR(
+                    (COALESCE(SUM(fvt.transaction_time), 0) + COALESCE(SUM(fvt.waiting_time), 0)) * INTERVAL '1 second',
+                    'HH24:MI:SS'
+                ) AS total_visit_time,
+
+                (SELECT vd.customs_number 
+                 FROM visits_declaration vd
+                 WHERE vd.visit_id = dv.origin_id::varchar
+                 ORDER BY vd.created_at DESC LIMIT 1) AS declaration,
+
+                (SELECT vd.type 
+                 FROM visits_declaration vd
+                 WHERE vd.visit_id = dv.origin_id::varchar
+                 ORDER BY vd.created_at DESC LIMIT 1) AS representation,
+
+                (SELECT vd.representative_name 
+                 FROM visits_declaration vd
+                 WHERE vd.visit_id = dv.origin_id::varchar
+                 ORDER BY vd.created_at DESC LIMIT 1) AS representative_name,
+
+                (SELECT vd.representative_voen 
+                 FROM visits_declaration vd
+                 WHERE vd.visit_id = dv.origin_id::varchar
+                 ORDER BY vd.created_at DESC LIMIT 1) AS representative_voen,
+
+                (SELECT vd.company_name 
+                 FROM visits_declaration vd
+                 WHERE vd.visit_id = dv.origin_id::varchar
+                 ORDER BY vd.created_at DESC LIMIT 1) AS represented_party_name,
+
+                (SELECT vd.company_voen 
+                 FROM visits_declaration vd
+                 WHERE vd.visit_id = dv.origin_id::varchar
+                 ORDER BY vd.created_at DESC LIMIT 1) AS represented_party_voen,
+
+                (SELECT s_ds.name 
+                 FROM fact_visit_transaction s_fvt
+                 INNER JOIN dim_service AS s_ds ON s_ds.id = s_fvt.service_key
+                 WHERE s_fvt.visit_key = dv.id
+                 ORDER BY s_fvt.create_timestamp LIMIT 1) AS service_name,
+
+                (SELECT vn.status 
+                 FROM visits_note vn
+                 WHERE vn.visit_id = dv.id::varchar 
+                   AND vn.action = 'finish'
+                 ORDER BY vn.created_at ASC LIMIT 1) AS result,
+
+                (SELECT dvet.name 
+                 FROM fact_visit_transaction s_fvt
+                 LEFT JOIN fact_visit_events s_fve ON s_fve.visit_transaction_id = s_fvt.id
+                 LEFT JOIN dim_visit_event_type dvet ON dvet.id = s_fve.visit_event_type_key
+                 WHERE s_fvt.visit_key = dv.id
+                 ORDER BY s_fvt.create_timestamp DESC LIMIT 1) AS status
+
+            FROM dim_visit dv
+            LEFT JOIN fact_visit_transaction fvt ON dv.id = fvt.visit_key
+            LEFT JOIN stat.dim_customer dc ON dc.id::varchar = dv.custom_1
+            WHERE dv.custom_1 IS NOT NULL
         """
 
         count_query = """
-                SELECT COUNT(*) AS sum from (		
+            SELECT COUNT(*) AS sum FROM (		
                 SELECT
                     dv.id AS visit_key,
                     COUNT(fvt.id) AS transactions_count,
                     dc.first_name, dc.last_name, dc.pin, 
-                dv.ticket_id,
-                dv.created_timestamp,
-                sum(fvt.transaction_time) as total_transaction_time, 
-                    sum(fvt.waiting_time) as total_wait_time,
-                (SELECT s_ds.name FROM fact_visit_transaction s_fvt
-                INNER JOIN dim_service AS s_ds ON s_ds.id = s_fvt.service_key
-                WHERE s_fvt.visit_key = dv.id
-                    ORDER BY create_timestamp LIMIT 1) 
-                    AS service_name
-                FROM 
-                    dim_visit dv
-                left join fact_visit_transaction fvt ON dv.id = fvt.visit_key
-                left join stat.dim_customer dc on dc.id::varchar = dv.custom_1
-                where dv.custom_1 is not null
-
+                    dv.ticket_id,
+                    dv.created_timestamp,
+                    SUM(fvt.transaction_time) AS total_transaction_time, 
+                    SUM(fvt.waiting_time) AS total_wait_time,
+                    (SELECT s_ds.name FROM fact_visit_transaction s_fvt
+                    INNER JOIN dim_service AS s_ds ON s_ds.id = s_fvt.service_key
+                    WHERE s_fvt.visit_key = dv.id
+                        ORDER BY create_timestamp LIMIT 1) AS service_name
+                FROM dim_visit dv
+                LEFT JOIN fact_visit_transaction fvt ON dv.id = fvt.visit_key
+                LEFT JOIN stat.dim_customer dc ON dc.id::varchar = dv.custom_1
+                WHERE dv.custom_1 IS NOT NULL
         """
 
+        # Existing filters
         if min_date_selected and max_date_selected:
-            query += f"AND fvt.date_key BETWEEN '{min_date_selected}' AND '{max_date_selected}'"
-            count_query += f"AND fvt.date_key BETWEEN '{min_date_selected}' AND '{max_date_selected}'"
+            query += f" AND fvt.date_key BETWEEN '{min_date_selected}' AND '{max_date_selected}'"
+            count_query += f" AND fvt.date_key BETWEEN '{min_date_selected}' AND '{max_date_selected}'"
 
         if selected_branches:
-            query += f"AND db.id in ({','.join(selected_branches)}) "
-            count_query += f"AND db.id IN ({','.join(selected_branches)}) "
+            query += f" AND db.id IN ({','.join(selected_branches)}) "
+            count_query += f" AND db.id IN ({','.join(selected_branches)}) "
 
         if selected_services and not selected_services == ['']:
-            query += f"""and dv.id in (SELECT sfvt.visit_key FROM fact_visit_transaction sfvt INNER JOIN dim_service AS sds ON sds.id = sfvt.service_key WHERE sds.origin_id in ({','.join(selected_services)}))"""
-            count_query += f"and dv.id in (SELECT sfvt.visit_key FROM fact_visit_transaction sfvt INNER JOIN dim_service AS sds ON sds.id = sfvt.service_key WHERE sds.origin_id in ({','.join(selected_services)})) "
+            query += f""" AND dv.id IN (
+                SELECT sfvt.visit_key FROM fact_visit_transaction sfvt 
+                INNER JOIN dim_service AS sds ON sds.id = sfvt.service_key 
+                WHERE sds.origin_id IN ({','.join(selected_services)})
+            )"""
+            count_query += f""" AND dv.id IN (
+                SELECT sfvt.visit_key FROM fact_visit_transaction sfvt 
+                INNER JOIN dim_service AS sds ON sds.id = sfvt.service_key 
+                WHERE sds.origin_id IN ({','.join(selected_services)})
+            )"""
 
         if selected_customer:
-            query += f"and dc.id = {selected_customer} "
-            count_query += f"and dc.id = {selected_customer} "
+            query += f" AND dc.id = {selected_customer} "
+            count_query += f" AND dc.id = {selected_customer} "
 
         if selected_first_name:
-            query += f"AND dc.first_name ilike '%{selected_first_name}%'"
-            count_query += f"AND dc.first_name ilike '%{selected_first_name}%'"
+            query += f" AND dc.first_name ILIKE '%{selected_first_name}%'"
+            count_query += f" AND dc.first_name ILIKE '%{selected_first_name}%'"
 
         if selected_last_name:
-            query += f"AND dc.last_name ilike '%{selected_last_name}%'"
-            count_query += f"AND dc.last_name ilike '%{selected_last_name}%'"
+            query += f" AND dc.last_name ILIKE '%{selected_last_name}%'"
+            count_query += f" AND dc.last_name ILIKE '%{selected_last_name}%'"
 
         if selected_father_name:
-            query += f"AND dc.father_name ilike '%{selected_father_name}%'"
-            count_query += f"AND dc.father_name ilike '%{selected_father_name}%'"
+            query += f" AND dc.father_name ILIKE '%{selected_father_name}%'"
+            count_query += f" AND dc.father_name ILIKE '%{selected_father_name}%'"
 
         if entered_text:
-            query += f"and (lower(dc.first_name) like lower('%{entered_text}%') or lower(dc.last_name) like lower('%{entered_text}%') or lower(dc.pin) like lower('%{entered_text}%'))"
-            count_query += f"and (lower(dc.first_name) like lower('%{entered_text}%') or lower(dc.last_name) like lower('%{entered_text}%') or lower(dc.pin) like lower('%{entered_text}%'))"
+            query += f""" AND (
+                LOWER(dc.first_name) LIKE LOWER('%{entered_text}%') OR 
+                LOWER(dc.last_name) LIKE LOWER('%{entered_text}%') OR 
+                LOWER(dc.pin) LIKE LOWER('%{entered_text}%')
+            )"""
+            count_query += f""" AND (
+                LOWER(dc.first_name) LIKE LOWER('%{entered_text}%') OR 
+                LOWER(dc.last_name) LIKE LOWER('%{entered_text}%') OR 
+                LOWER(dc.pin) LIKE LOWER('%{entered_text}%')
+            )"""
 
-        query += f'GROUP BY dv.id, dv.origin_id, dc.first_name, dc.last_name, dc.pin, dv.ticket_id OFFSET {pg_size} * ({pg_num} - 1) LIMIT {pg_size}'
+        # New filters for declaration fields
+        if declaration:
+            query += f""" AND EXISTS (
+                SELECT 1 FROM visits_declaration vd 
+                WHERE vd.visit_id = dv.origin_id::varchar 
+                AND vd.customs_number ILIKE '%{declaration}%'
+            )"""
+            count_query += f""" AND EXISTS (
+                SELECT 1 FROM visits_declaration vd 
+                WHERE vd.visit_id = dv.origin_id::varchar 
+                AND vd.customs_number ILIKE '%{declaration}%'
+            )"""
 
-        count_query += 'GROUP BY dv.id,dc.first_name, dc.last_name, dc.pin, dv.ticket_id)  as subquery;'
+        if representation:
+            query += f""" AND EXISTS (
+                SELECT 1 FROM visits_declaration vd 
+                WHERE vd.visit_id = dv.origin_id::varchar 
+                AND vd.type ILIKE '%{representation}%'
+            )"""
+            count_query += f""" AND EXISTS (
+                SELECT 1 FROM visits_declaration vd 
+                WHERE vd.visit_id = dv.origin_id::varchar 
+                AND vd.type ILIKE '%{representation}%'
+            )"""
+
+        if representative_name:
+            query += f""" AND EXISTS (
+                SELECT 1 FROM visits_declaration vd 
+                WHERE vd.visit_id = dv.origin_id::varchar 
+                AND vd.representative_name ILIKE '%{representative_name}%'
+            )"""
+            count_query += f""" AND EXISTS (
+                SELECT 1 FROM visits_declaration vd 
+                WHERE vd.visit_id = dv.origin_id::varchar 
+                AND vd.representative_name ILIKE '%{representative_name}%'
+            )"""
+
+        if representative_voen:
+            query += f""" AND EXISTS (
+                SELECT 1 FROM visits_declaration vd 
+                WHERE vd.visit_id = dv.origin_id::varchar 
+                AND vd.representative_voen ILIKE '%{representative_voen}%'
+            )"""
+            count_query += f""" AND EXISTS (
+                SELECT 1 FROM visits_declaration vd 
+                WHERE vd.visit_id = dv.origin_id::varchar 
+                AND vd.representative_voen ILIKE '%{representative_voen}%'
+            )"""
+
+        if represented_party_name:
+            query += f""" AND EXISTS (
+                SELECT 1 FROM visits_declaration vd 
+                WHERE vd.visit_id = dv.origin_id::varchar 
+                AND vd.company_name ILIKE '%{represented_party_name}%'
+            )"""
+            count_query += f""" AND EXISTS (
+                SELECT 1 FROM visits_declaration vd 
+                WHERE vd.visit_id = dv.origin_id::varchar 
+                AND vd.company_name ILIKE '%{represented_party_name}%'
+            )"""
+
+        if represented_party_voen:
+            query += f""" AND EXISTS (
+                SELECT 1 FROM visits_declaration vd 
+                WHERE vd.visit_id = dv.origin_id::varchar 
+                AND vd.company_voen ILIKE '%{represented_party_voen}%'
+            )"""
+            count_query += f""" AND EXISTS (
+                SELECT 1 FROM visits_declaration vd 
+                WHERE vd.visit_id = dv.origin_id::varchar 
+                AND vd.company_voen ILIKE '%{represented_party_voen}%'
+            )"""
+
+        # GROUP BY and pagination
+        query += f""" GROUP BY dv.id, dv.origin_id, dc.first_name, dc.last_name, dc.pin, dv.ticket_id
+                      ORDER BY dv.created_timestamp DESC
+                      OFFSET {pg_size} * ({pg_num} - 1) LIMIT {pg_size}"""
+
+        count_query += """ GROUP BY dv.id, dc.first_name, dc.last_name, dc.pin, dv.ticket_id
+                         ) AS subquery;"""
 
         cursor = get_connection()
         cursor.execute(query)
         data = convert_data(cursor)
 
-        # Get all origin_ids from the result (visits_declaration.visit_id = dim_visit.origin_id)
+        # Get all origin_ids from the result
         origin_ids = [str(item['visit_origin_id']) for item in data if item.get('visit_origin_id')]
 
         # Fetch declarations for all visits using origin_id
         declarations_map = {}
         if origin_ids:
-            # Use parameterized query to prevent SQL injection
             placeholders = ','.join(['%s'] * len(origin_ids))
             declarations_query = f"""
                 SELECT 
@@ -765,7 +910,6 @@ class VisitListOfCustomer(APIView):
             cursor.execute(declarations_query, origin_ids)
             declarations_data = convert_data(cursor)
 
-            # Group declarations by visit_id (which is origin_id)
             for decl in declarations_data:
                 visit_id = str(decl['visit_id'])
                 if visit_id not in declarations_map:
@@ -782,12 +926,10 @@ class VisitListOfCustomer(APIView):
                     'created_at': decl['created_at'].isoformat() if decl.get('created_at') else None
                 })
 
-        # Add declarations to each visit data using origin_id
-        # Remove phone, birth_date, image from visit data (they should only be in profile)
+        # Add declarations to each visit data
         for item in data:
             origin_id = str(item.get('visit_origin_id', ''))
             item['declarations'] = declarations_map.get(origin_id, [])
-            # Remove these fields from visit data
             item.pop('phone', None)
             item.pop('birth_date', None)
             item.pop('image', None)
@@ -798,9 +940,37 @@ class VisitListOfCustomer(APIView):
 
         extract_integer = lambda x: x[0] if isinstance(x, tuple) else x
 
-        all = {"data": result, "count": extract_integer(count[0]), 'profile': profile_serializer_data}
+        # Calculate statistics for the profile
+        stats_query = f"""
+            SELECT 
+                COUNT(DISTINCT dv.id) as total_visits,
+                COUNT(DISTINCT CASE WHEN dvet.name ILIKE '%XIDMET GOSTERILDI%' OR dvet.name ILIKE '%SERVICE PROVIDED%' THEN dv.id END) as service_provided,
+                COUNT(DISTINCT CASE WHEN dvet.name ILIKE '%GELMEDI%' OR dvet.name ILIKE '%DID NOT COME%' THEN dv.id END) as did_not_come,
+                COUNT(DISTINCT CASE WHEN dvet.name ILIKE '%CAGIRILMADI%' OR dvet.name ILIKE '%NOT CALLED%' THEN dv.id END) as not_called
+            FROM dim_visit dv
+            LEFT JOIN fact_visit_transaction fvt ON dv.id = fvt.visit_key
+            LEFT JOIN fact_visit_events fve ON fve.visit_transaction_id = fvt.id
+            LEFT JOIN dim_visit_event_type dvet ON dvet.id = fve.visit_event_type_key
+            WHERE dv.custom_1 = '{selected_customer}'
+        """
+        cursor.execute(stats_query)
+        stats_data = convert_data(cursor)
+
+        if stats_data:
+            profile_serializer_data['statistics'] = {
+                'totalVisits': stats_data[0].get('total_visits', 0),
+                'serviceProvided': stats_data[0].get('service_provided', 0),
+                'didNotCome': stats_data[0].get('did_not_come', 0),
+                'notCalled': stats_data[0].get('not_called', 0)
+            }
+
+        all_data = {
+            "data": result,
+            "count": extract_integer(count[0]),
+            'profile': profile_serializer_data
+        }
         cursor.close()
-        return Response(all)
+        return Response(all_data)
 
 
 class Export(APIView):

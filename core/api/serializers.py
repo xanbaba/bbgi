@@ -38,7 +38,7 @@ class TransactionDataSerializer(serializers.Serializer):
 
     def get_transaction_time(self,obj):
         return format_time(obj['transaction_time'])
-    
+
     def get_finish_time(self,obj):
         call_time = obj['call_timestamp']
         transaction_time = obj['transaction_time']
@@ -48,7 +48,7 @@ class TransactionDataSerializer(serializers.Serializer):
             finish_time = datetime.strftime(finish_time, time_format)
             return finish_time
         return None
-    
+
     def get_status(self, obj):
         """Return status from database (dim_visit_event_type.name), default is 'Xidmət göstərildi'"""
         return obj.get('status', 'Xidmət göstərildi')
@@ -118,70 +118,63 @@ class VisitSerializer(serializers.Serializer):
     last_name = serializers.CharField(max_length=100)
     pin = serializers.CharField(max_length=50)
     ticket_id = serializers.CharField(max_length=10)
-    service_name = serializers.CharField(max_length=100)
+    service_name = serializers.CharField(max_length=100, allow_null=True, required=False)
     transactions_count = serializers.IntegerField()
     visit_key = serializers.IntegerField()
-    created_date = serializers.SerializerMethodField(source = 'created_timestamp')
+    visit_origin_id = serializers.IntegerField(allow_null=True, required=False)
+    created_date = serializers.SerializerMethodField()
     total_transaction_time = serializers.SerializerMethodField()
     total_wait_time = serializers.SerializerMethodField()
-    total_visit_time =  serializers.SerializerMethodField()
+    total_visit_time = serializers.SerializerMethodField()
     declarations = serializers.SerializerMethodField()
-    result = serializers.IntegerField(allow_null=True, required=False)
+    result = serializers.CharField(allow_null=True, required=False)
     status = serializers.SerializerMethodField()
 
-    def get_total_wait_time(self,obj):
-        return format_time(obj['total_wait_time'])
+    # New declaration fields
+    declaration = serializers.CharField(max_length=255, allow_null=True, required=False)
+    representation = serializers.CharField(max_length=255, allow_null=True, required=False)
+    representative_name = serializers.CharField(max_length=255, allow_null=True, required=False)
+    representative_voen = serializers.CharField(max_length=50, allow_null=True, required=False)
+    represented_party_name = serializers.CharField(max_length=255, allow_null=True, required=False)
+    represented_party_voen = serializers.CharField(max_length=50, allow_null=True, required=False)
 
-    def get_total_transaction_time(self,obj):
-        return format_time(obj['total_transaction_time'])   
-    
-    def get_total_visit_time(self,obj):
+    def get_total_wait_time(self, obj):
+        return format_time(obj.get('total_wait_time'))
 
-        total_wait_time = obj.get('total_wait_time',0)
-        total_transaction_time = obj.get('total_transaction_time',0)
+    def get_total_transaction_time(self, obj):
+        return format_time(obj.get('total_transaction_time'))
+
+    def get_total_visit_time(self, obj):
+        total_wait_time = obj.get('total_wait_time', 0)
+        total_transaction_time = obj.get('total_transaction_time', 0)
+
         if not total_wait_time:
             total_wait_time = 0
-        
+
         if not total_transaction_time:
             total_transaction_time = 0
-            
-        total_visit_time = format_time(total_wait_time+ total_transaction_time)
+
+        total_visit_time = format_time(total_wait_time + total_transaction_time)
         return total_visit_time
 
-    def get_created_date(self,obj):
-        converted_date = datetime.fromtimestamp(obj['created_timestamp']/1000).strftime('%d-%m-%Y')
-        return converted_date
-    
-    def get_birth_date(self,obj):
-        if not obj.get('birth_date'):
+    def get_created_date(self, obj):
+        created_timestamp = obj.get('created_timestamp')
+        if not created_timestamp:
             return None
         try:
-            if isinstance(obj['birth_date'], str):
-                # Try different date formats
-                for fmt in ['%Y-%m-%d', '%Y-%M-%d', '%d-%m-%Y', '%d/%m/%Y']:
-                    try:
-                        converted_date = datetime.strptime(obj['birth_date'], fmt).strftime('%d-%m-%Y')
-                        return converted_date
-                    except ValueError:
-                        continue
-                # If no format matches, return as is
-                return obj['birth_date']
-            else:
-                # If it's a date object
-                converted_date = obj['birth_date'].strftime('%d-%m-%Y')
-                return converted_date
+            converted_date = datetime.fromtimestamp(created_timestamp / 1000).strftime('%d-%m-%Y %H:%M')
+            return converted_date
         except Exception as e:
-            print('Birth date format error: ',e)
-            return obj.get('birth_date')
-    
+            print('Created date format error:', e)
+            return None
+
     def get_declarations(self, obj):
         """Return declarations data as list"""
         declarations = obj.get('declarations', [])
         if not declarations:
             return []
-        
         return declarations
-    
+
     def get_status(self, obj):
         """Return status from database (last transaction's dim_visit_event_type.name), default is 'Xidmət göstərildi'"""
         return obj.get('status', 'Xidmət göstərildi')
@@ -263,54 +256,80 @@ class CustomerAllExportSerializer(serializers.Serializer):
         }
         return azerbaijani_data
 
+
 class VisitExportSerializer(serializers.Serializer):
     first_name = serializers.CharField(max_length=100)
     last_name = serializers.CharField(max_length=100)
     pin = serializers.CharField(max_length=50)
     ticket_id = serializers.CharField(max_length=10)
-    service_name = serializers.CharField(max_length=100)
+    service_name = serializers.CharField(max_length=100, allow_null=True, required=False)
     transactions_count = serializers.IntegerField()
-    created_date = serializers.SerializerMethodField(source = 'created_timestamp')
+    created_date = serializers.SerializerMethodField()
     total_transaction_time = serializers.SerializerMethodField()
     total_wait_time = serializers.SerializerMethodField()
-    total_visit_time =  serializers.SerializerMethodField()
+    total_visit_time = serializers.SerializerMethodField()
+    result = serializers.CharField(allow_null=True, required=False)
+    status = serializers.CharField(allow_null=True, required=False)
 
-    def get_total_wait_time(self,obj):
-        return format_time(obj['total_wait_time'])
+    # New declaration fields
+    declaration = serializers.CharField(max_length=255, allow_null=True, required=False)
+    representation = serializers.CharField(max_length=255, allow_null=True, required=False)
+    representative_name = serializers.CharField(max_length=255, allow_null=True, required=False)
+    representative_voen = serializers.CharField(max_length=50, allow_null=True, required=False)
+    represented_party_name = serializers.CharField(max_length=255, allow_null=True, required=False)
+    represented_party_voen = serializers.CharField(max_length=50, allow_null=True, required=False)
 
-    def get_total_transaction_time(self,obj):
-        return format_time(obj['total_transaction_time'])   
-    
-    def get_total_visit_time(self,obj):
+    def get_total_wait_time(self, obj):
+        return format_time(obj.get('total_wait_time'))
 
-        total_wait_time = obj.get('total_wait_time',0)
-        total_transaction_time = obj.get('total_transaction_time',0)
+    def get_total_transaction_time(self, obj):
+        return format_time(obj.get('total_transaction_time'))
+
+    def get_total_visit_time(self, obj):
+        total_wait_time = obj.get('total_wait_time', 0)
+        total_transaction_time = obj.get('total_transaction_time', 0)
+
         if not total_wait_time:
             total_wait_time = 0
-        
+
         if not total_transaction_time:
             total_transaction_time = 0
-            
-        total_visit_time = format_time(total_wait_time+ total_transaction_time)
+
+        total_visit_time = format_time(total_wait_time + total_transaction_time)
         return total_visit_time
 
-    def get_created_date(self,obj):
-        converted_date = datetime.fromtimestamp(obj['created_timestamp']/1000).strftime('%d-%m-%Y')
-        return converted_date
-    
+    def get_created_date(self, obj):
+        created_timestamp = obj.get('created_timestamp')
+        if not created_timestamp:
+            return None
+        try:
+            converted_date = datetime.fromtimestamp(created_timestamp / 1000).strftime('%d-%m-%Y')
+            return converted_date
+        except Exception as e:
+            print('Created date format error:', e)
+            return None
 
     def to_representation(self, instance):
         original_data = super().to_representation(instance)
         azerbaijani_data = {
-            "Ad": original_data["first_name"],
-            "Soyad": original_data["last_name"],
-            "FIN": original_data["pin"],
-            "Bilet_id": original_data["ticket_id"],
-            "Servis": original_data["service_name"],
-            "Transaction sayı": original_data["transactions_count"],
-            "Yaranma tarixi": original_data["created_date"],
-            "Ümumi transaction vaxtı": original_data["total_transaction_time"],
-            "Ümumi ziyarət vaxtı": original_data["total_visit_time"],
+            "Ad": original_data.get("first_name", "-"),
+            "Soyad": original_data.get("last_name", "-"),
+            "FIN": original_data.get("pin", "-"),
+            "Bilet": original_data.get("ticket_id", "-"),
+            "Xidmət": original_data.get("service_name", "-"),
+            "Transaction sayı": original_data.get("transactions_count", 0),
+            "Yaranma tarixi": original_data.get("created_date", "-"),
+            "Gözləmə vaxtı": original_data.get("total_wait_time", "-"),
+            "Transaction vaxtı": original_data.get("total_transaction_time", "-"),
+            "Ziyarət müddəti": original_data.get("total_visit_time", "-"),
+            "Bəyannamə": original_data.get("declaration", "-"),
+            "Təmsilçilik": original_data.get("representation", "-"),
+            "Təmsilçi adı": original_data.get("representative_name", "-"),
+            "Təmsilçi VÖEN": original_data.get("representative_voen", "-"),
+            "Təmsil olunan": original_data.get("represented_party_name", "-"),
+            "Təmsil olunan VÖEN": original_data.get("represented_party_voen", "-"),
+            "Status": original_data.get("status", "-"),
+            "Nəticə": original_data.get("result", "-"),
         }
         return azerbaijani_data
     
