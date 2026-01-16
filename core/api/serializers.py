@@ -113,6 +113,34 @@ class StatisticSerializer(serializers.Serializer):
         return None
 
 
+class StatisticsApiSerializer(serializers.Serializer):
+    id = serializers.IntegerField(source='visit_key')  # ID / Ziyarət
+    visit_date = serializers.CharField()  # Tarix
+    ticket_id = serializers.CharField()  # Bilet
+    service_name = serializers.CharField(allow_null=True, required=False)  # Xidmət
+    visit_duration = serializers.SerializerMethodField()  # Ziyarət müddəti
+
+    # Declaration fields
+    declaration = serializers.CharField(source='customs_number', allow_null=True, required=False)  # Bəyanname
+    representation = serializers.CharField(source='type', allow_null=True, required=False)  # Təmsilçilik
+    representative_name = serializers.CharField(allow_null=True, required=False)  # Təmsilçilik adı
+    representative_voen = serializers.CharField(allow_null=True, required=False)  # Təmsilçilik VOEN
+    represented_party_name = serializers.CharField(source='company_name', allow_null=True,
+                                                   required=False)  # Təmsil olunan
+    represented_party_voen = serializers.CharField(source='company_voen', allow_null=True,
+                                                   required=False)  # Təmsil olunan VOEN
+
+    status = serializers.CharField(allow_null=True, required=False)  # Status
+    result = serializers.CharField(allow_null=True, required=False)  # Nəticə
+
+    def get_visit_duration(self, obj):
+        """Calculates formatted duration from transaction and wait time"""
+        transaction_time = obj.get('total_transaction_time') or 0
+        wait_time = obj.get('total_wait_time') or 0
+        total_seconds = transaction_time + wait_time
+        return format_time(total_seconds)
+
+
 class VisitSerializer(serializers.Serializer):
     first_name = serializers.CharField(max_length=100)
     last_name = serializers.CharField(max_length=100)

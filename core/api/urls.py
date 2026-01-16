@@ -4,7 +4,7 @@ from .views import *
 
 urlpatterns = [
     path('mrz/', PassportAPI.as_view()), #  Branch.as_view({'get': 'list'}) bele olsaydi Branch View yox gerek Viewset olardi
-    path('statistics/', MainReport.as_view()),
+    path('statistics/', StatisticsApi.as_view()),
     path('customer-list/', CustomerList.as_view()),
     path('visit-list-customer/', VisitListOfCustomer.as_view()), 
     path('export/', Export.as_view()), 

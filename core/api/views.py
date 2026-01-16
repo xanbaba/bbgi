@@ -2,7 +2,7 @@ from rest_framework.views import APIView
 from rest_framework.response import Response
 
 from core.api.helper import convert_data, parse_time
-from core.api.serializers import CustomerAllExportSerializer, CustomerAllSerializer, CustomerSerializer, \
+from core.api.serializers import StatisticsApiSerializer, CustomerAllExportSerializer, CustomerAllSerializer, CustomerSerializer, \
     StatisticExportSerializer, StatisticSerializer, TransactionDataSerializer, VisitExportSerializer, VisitSerializer
 from ..mrz_input import get_id_data
 from requests.auth import HTTPBasicAuth
@@ -1484,6 +1484,220 @@ class BranchListApi(APIView):
         service_data = convert_data(cursor)
         return Response(service_data)
 
+
+# --- View ---
+
+class StatisticsApi(APIView):
+
+    def get(self, request):
+        # Pagination
+        pg_size = int(request.query_params.get('pg_size', 10))
+        pg_num = int(request.query_params.get('pg_num', 1))
+        offset = (pg_num - 1) * pg_size
+
+        # Filters
+        min_date_selected = request.query_params.get('minDateSelected')
+        max_date_selected = request.query_params.get('maxDateSelected')
+        selected_branches = request.query_params.getlist('selectedBranches')
+        selected_services = request.query_params.getlist('selectedServices')
+
+        # Text search
+        entered_text = request.query_params.get('enteredText')
+        selected_first_name = request.query_params.get('first_name')
+        selected_last_name = request.query_params.get('last_name')
+        selected_father_name = request.query_params.get('father_name')
+
+        # Declaration filters
+        declaration = request.query_params.get('declaration')
+        representation = request.query_params.get('representation')
+        representative_name = request.query_params.get('representative_name')
+        representative_voen = request.query_params.get('representative_voen')
+        represented_party_name = request.query_params.get('represented_party_name')
+        represented_party_voen = request.query_params.get('represented_party_voen')
+
+        cursor = get_connection()
+
+        # ---- Common Conditions ----
+        # We build the WHERE conditions string once to apply to both queries
+        where_conditions = ["dv.custom_1 IS NOT NULL"]
+
+        # Dates
+        if min_date_selected and max_date_selected:
+            where_conditions.append(f"fvt.date_key BETWEEN '{min_date_selected}' AND '{max_date_selected}'")
+
+        # Branches
+        if selected_branches:
+            branches_str = ','.join(selected_branches)
+            where_conditions.append(f"db.id IN ({branches_str})")
+
+        # Services
+        if selected_services and not selected_services == ['']:
+            services_str = ','.join(selected_services)
+            where_conditions.append(f"""dv.id IN (
+                SELECT sfvt.visit_key FROM fact_visit_transaction sfvt 
+                INNER JOIN dim_service AS sds ON sds.id = sfvt.service_key 
+                WHERE sds.origin_id IN ({services_str})
+            )""")
+
+        # Customer Names/PIN
+        if selected_first_name:
+            where_conditions.append(f"dc.first_name ILIKE '%{selected_first_name}%'")
+
+        if selected_last_name:
+            where_conditions.append(f"dc.last_name ILIKE '%{selected_last_name}%'")
+
+        if selected_father_name:
+            where_conditions.append(f"dc.father_name ILIKE '%{selected_father_name}%'")
+
+        if entered_text:
+            where_conditions.append(f"""(
+                LOWER(dc.first_name) LIKE LOWER('%{entered_text}%') OR 
+                LOWER(dc.last_name) LIKE LOWER('%{entered_text}%') OR 
+                LOWER(dc.pin) LIKE LOWER('%{entered_text}%')
+            )""")
+
+        # Declaration Fields Filters
+        if declaration:
+            where_conditions.append(f"""EXISTS (
+                SELECT 1 FROM visits_declaration vdecl 
+                WHERE vdecl.visit_id = dv.origin_id::varchar 
+                AND vdecl.customs_number ILIKE '%{declaration}%'
+            )""")
+
+        if representation:
+            where_conditions.append(f"""EXISTS (
+                SELECT 1 FROM visits_declaration vdecl 
+                WHERE vdecl.visit_id = dv.origin_id::varchar 
+                AND vdecl.type ILIKE '%{representation}%'
+            )""")
+
+        if representative_name:
+            where_conditions.append(f"""EXISTS (
+                SELECT 1 FROM visits_declaration vdecl 
+                WHERE vdecl.visit_id = dv.origin_id::varchar 
+                AND vdecl.representative_name ILIKE '%{representative_name}%'
+            )""")
+
+        if representative_voen:
+            where_conditions.append(f"""EXISTS (
+                SELECT 1 FROM visits_declaration vdecl 
+                WHERE vdecl.visit_id = dv.origin_id::varchar 
+                AND vdecl.representative_voen ILIKE '%{representative_voen}%'
+            )""")
+
+        if represented_party_name:
+            where_conditions.append(f"""EXISTS (
+                SELECT 1 FROM visits_declaration vdecl 
+                WHERE vdecl.visit_id = dv.origin_id::varchar 
+                AND vdecl.company_name ILIKE '%{represented_party_name}%'
+            )""")
+
+        if represented_party_voen:
+            where_conditions.append(f"""EXISTS (
+                SELECT 1 FROM visits_declaration vdecl 
+                WHERE vdecl.visit_id = dv.origin_id::varchar 
+                AND vdecl.company_voen ILIKE '%{represented_party_voen}%'
+            )""")
+
+        where_sql = " AND ".join(where_conditions)
+
+        # ---- Main Query ----
+        query = f"""
+            SELECT 
+                dv.id AS visit_key,
+                dv.ticket_id,
+                TO_CHAR(TO_TIMESTAMP(dv.created_timestamp / 1000), 'DD-MM-YYYY HH24:MI') AS visit_date,
+
+                (SELECT s_ds.name 
+                 FROM fact_visit_transaction s_fvt
+                 INNER JOIN dim_service AS s_ds ON s_ds.id = s_fvt.service_key
+                 WHERE s_fvt.visit_key = dv.id
+                 ORDER BY s_fvt.create_timestamp LIMIT 1) AS service_name,
+
+                SUM(fvt.transaction_time) AS total_transaction_time, 
+                SUM(fvt.waiting_time) AS total_wait_time,
+
+                (SELECT vdecl.customs_number 
+                 FROM visits_declaration vdecl
+                 WHERE vdecl.visit_id = dv.origin_id::varchar
+                 ORDER BY vdecl.created_at DESC LIMIT 1) AS customs_number,
+
+                (SELECT vdecl.type 
+                 FROM visits_declaration vdecl
+                 WHERE vdecl.visit_id = dv.origin_id::varchar
+                 ORDER BY vdecl.created_at DESC LIMIT 1) AS type,
+
+                (SELECT vdecl.representative_name 
+                 FROM visits_declaration vdecl
+                 WHERE vdecl.visit_id = dv.origin_id::varchar
+                 ORDER BY vdecl.created_at DESC LIMIT 1) AS representative_name,
+
+                (SELECT vdecl.representative_voen 
+                 FROM visits_declaration vdecl
+                 WHERE vdecl.visit_id = dv.origin_id::varchar
+                 ORDER BY vdecl.created_at DESC LIMIT 1) AS representative_voen,
+
+                (SELECT vdecl.company_name 
+                 FROM visits_declaration vdecl
+                 WHERE vdecl.visit_id = dv.origin_id::varchar
+                 ORDER BY vdecl.created_at DESC LIMIT 1) AS company_name,
+
+                (SELECT vdecl.company_voen 
+                 FROM visits_declaration vdecl
+                 WHERE vdecl.visit_id = dv.origin_id::varchar
+                 ORDER BY vdecl.created_at DESC LIMIT 1) AS company_voen,
+
+                (SELECT vn.status 
+                 FROM visits_note vn
+                 WHERE vn.visit_id = dv.id::varchar 
+                   AND vn.action = 'finish'
+                 ORDER BY vn.created_at ASC LIMIT 1) AS result,
+
+                (SELECT dvet.name 
+                 FROM fact_visit_events s_fve
+                 INNER JOIN dim_visit_event_type dvet ON dvet.id = s_fve.visit_event_type_key
+                 WHERE s_fve.visit_key = dv.id
+                 ORDER BY s_fve.event_timestamp DESC LIMIT 1) AS status
+
+            FROM dim_visit dv
+            LEFT JOIN fact_visit_transaction fvt ON dv.id = fvt.visit_key
+            LEFT JOIN stat.dim_customer dc ON dc.id::varchar = dv.custom_1
+            LEFT JOIN stat.dim_branch db ON db.id = fvt.branch_key
+            WHERE {where_sql}
+            GROUP BY dv.id, dv.ticket_id, dv.created_timestamp
+            ORDER BY dv.created_timestamp DESC
+            LIMIT {pg_size} OFFSET {offset}
+        """
+
+        # ---- Count Query ----
+        count_query = f"""
+            SELECT COUNT(*)
+            FROM (
+                SELECT dv.id
+                FROM dim_visit dv
+                LEFT JOIN fact_visit_transaction fvt ON dv.id = fvt.visit_key
+                LEFT JOIN stat.dim_customer dc ON dc.id::varchar = dv.custom_1
+                LEFT JOIN stat.dim_branch db ON db.id = fvt.branch_key
+                WHERE {where_sql}
+                GROUP BY dv.id
+            ) AS sub
+        """
+
+        # ---- Execution ----
+        cursor.execute(query)
+        data = convert_data(cursor)
+
+        cursor.execute(count_query)
+        total = cursor.fetchone()[0]
+        cursor.close()
+
+        # ---- Serialization ----
+        result = StatisticsApiSerializer(data, many=True).data
+
+        return Response({
+            "data": result,
+            "count": total
+        })
 
 class RiskFinUpdateApi(APIView):
     """
