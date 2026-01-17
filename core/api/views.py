@@ -1498,14 +1498,13 @@ class StatisticsApi(APIView):
         # Filters
         min_date_selected = request.query_params.get('minDateSelected')
         max_date_selected = request.query_params.get('maxDateSelected')
-        selected_branches = request.query_params.getlist('selectedBranches')
-        selected_services = request.query_params.getlist('selectedServices')
+
+        # Filter out empty strings from lists to prevent SQL syntax errors like "IN ()"
+        selected_branches = [b for b in request.query_params.getlist('selectedBranches') if b]
+        selected_services = [s for s in request.query_params.getlist('selectedServices') if s]
 
         # Text search
         entered_text = request.query_params.get('enteredText')
-        selected_first_name = request.query_params.get('first_name')
-        selected_last_name = request.query_params.get('last_name')
-        selected_father_name = request.query_params.get('father_name')
 
         # Declaration filters
         declaration = request.query_params.get('declaration')
@@ -1531,23 +1530,13 @@ class StatisticsApi(APIView):
             where_conditions.append(f"db.id IN ({branches_str})")
 
         # Services
-        if selected_services and not selected_services == ['']:
+        if selected_services:
             services_str = ','.join(selected_services)
             where_conditions.append(f"""dv.id IN (
                 SELECT sfvt.visit_key FROM fact_visit_transaction sfvt 
                 INNER JOIN dim_service AS sds ON sds.id = sfvt.service_key 
                 WHERE sds.origin_id IN ({services_str})
             )""")
-
-        # Customer Names/PIN
-        if selected_first_name:
-            where_conditions.append(f"dc.first_name ILIKE '%{selected_first_name}%'")
-
-        if selected_last_name:
-            where_conditions.append(f"dc.last_name ILIKE '%{selected_last_name}%'")
-
-        if selected_father_name:
-            where_conditions.append(f"dc.father_name ILIKE '%{selected_father_name}%'")
 
         if entered_text:
             where_conditions.append(f"""(
@@ -1698,7 +1687,6 @@ class StatisticsApi(APIView):
             "data": result,
             "count": total
         })
-
 class RiskFinUpdateApi(APIView):
     """
     API endpoint for updating or inserting risk FIN records.
