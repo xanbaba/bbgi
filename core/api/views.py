@@ -1495,100 +1495,111 @@ class StatisticsApi(APIView):
         pg_num = int(request.query_params.get('pg_num', 1))
         offset = (pg_num - 1) * pg_size
 
-        # Filters
-        min_date_selected = request.query_params.get('minDateSelected')
-        max_date_selected = request.query_params.get('maxDateSelected')
-
-        # Filter out empty strings from lists to prevent SQL syntax errors like "IN ()"
-        selected_branches = [b for b in request.query_params.getlist('selectedBranches') if b]
-        selected_services = [s for s in request.query_params.getlist('selectedServices') if s]
-
-        # Text search
-        entered_text = request.query_params.get('enteredText')
-
-        # Declaration filters
-        declaration = request.query_params.get('declaration')
-        representation = request.query_params.get('representation')
-        representative_name = request.query_params.get('representative_name')
-        representative_voen = request.query_params.get('representative_voen')
-        represented_party_name = request.query_params.get('represented_party_name')
-        represented_party_voen = request.query_params.get('represented_party_voen')
-
         cursor = get_connection()
+        params = {}
+        where = []
 
-        # ---- Common Conditions ----
-        # We build the WHERE conditions string once to apply to both queries
-        where_conditions = ["dv.custom_1 IS NOT NULL"]
+        # ---- Filters ----
 
-        # Dates
-        if min_date_selected and max_date_selected:
-            where_conditions.append(f"fvt.date_key BETWEEN '{min_date_selected}' AND '{max_date_selected}'")
+        # 1. Visit Date Range
+        if request.GET.get('minDateSelected') and request.GET.get('maxDateSelected'):
+            # Assuming input is 'YYYY-MM-DD'. Comparing date part of the visit timestamp.
+            where.append("TO_TIMESTAMP(dv.created_timestamp / 1000)::date BETWEEN %(min_date)s AND %(max_date)s")
+            params['min_date'] = request.GET['minDateSelected']
+            params['max_date'] = request.GET['maxDateSelected']
 
-        # Branches
-        if selected_branches:
-            branches_str = ','.join(selected_branches)
-            where_conditions.append(f"db.id IN ({branches_str})")
+        # 2. Ticket ID
+        if request.GET.get('ticket_id'):
+            where.append("dv.ticket_id ILIKE %(ticket_id)s")
+            params['ticket_id'] = f"%{request.GET['ticket_id']}%"
 
-        # Services
-        if selected_services:
-            services_str = ','.join(selected_services)
-            where_conditions.append(f"""dv.id IN (
-                SELECT sfvt.visit_key FROM fact_visit_transaction sfvt 
-                INNER JOIN dim_service AS sds ON sds.id = sfvt.service_key 
-                WHERE sds.origin_id IN ({services_str})
-            )""")
+        # 3. Service Name
+        # We use EXISTS to check if the visit has a service matching the name
+        if request.GET.get('service_name'):
+            where.append("""
+                EXISTS (
+                    SELECT 1 
+                    FROM fact_visit_transaction fvt_s
+                    INNER JOIN dim_service AS ds_s ON ds_s.id = fvt_s.service_key
+                    WHERE fvt_s.visit_key = dv.id AND ds_s.name ILIKE %(service_name)s
+                )
+            """)
+            params['service_name'] = f"%{request.GET['service_name']}%"
 
-        if entered_text:
-            where_conditions.append(f"""(
-                LOWER(dc.first_name) LIKE LOWER('%{entered_text}%') OR 
-                LOWER(dc.last_name) LIKE LOWER('%{entered_text}%') OR 
-                LOWER(dc.pin) LIKE LOWER('%{entered_text}%')
-            )""")
+        # 4. Declaration (Customs Number)
+        if request.GET.get('declaration'):
+            where.append("""
+                EXISTS (
+                    SELECT 1 FROM visits_declaration vd_filter 
+                    WHERE vd_filter.visit_id = dv.origin_id::varchar 
+                    AND vd_filter.customs_number ILIKE %(declaration)s
+                )
+            """)
+            params['declaration'] = f"%{request.GET['declaration']}%"
 
-        # Declaration Fields Filters
-        if declaration:
-            where_conditions.append(f"""EXISTS (
-                SELECT 1 FROM visits_declaration vdecl 
-                WHERE vdecl.visit_id = dv.origin_id::varchar 
-                AND vdecl.customs_number ILIKE '%{declaration}%'
-            )""")
+        # 5. Representation (Type)
+        if request.GET.get('representation'):
+            where.append("""
+                EXISTS (
+                    SELECT 1 FROM visits_declaration vd_filter 
+                    WHERE vd_filter.visit_id = dv.origin_id::varchar 
+                    AND vd_filter.type ILIKE %(representation)s
+                )
+            """)
+            params['representation'] = f"%{request.GET['representation']}%"
 
-        if representation:
-            where_conditions.append(f"""EXISTS (
-                SELECT 1 FROM visits_declaration vdecl 
-                WHERE vdecl.visit_id = dv.origin_id::varchar 
-                AND vdecl.type ILIKE '%{representation}%'
-            )""")
+        # 6. Representative Name
+        if request.GET.get('representative_name'):
+            where.append("""
+                EXISTS (
+                    SELECT 1 FROM visits_declaration vd_filter 
+                    WHERE vd_filter.visit_id = dv.origin_id::varchar 
+                    AND vd_filter.representative_name ILIKE %(rep_name)s
+                )
+            """)
+            params['rep_name'] = f"%{request.GET['representative_name']}%"
 
-        if representative_name:
-            where_conditions.append(f"""EXISTS (
-                SELECT 1 FROM visits_declaration vdecl 
-                WHERE vdecl.visit_id = dv.origin_id::varchar 
-                AND vdecl.representative_name ILIKE '%{representative_name}%'
-            )""")
+        # 7. Representative VOEN
+        if request.GET.get('representative_voen'):
+            where.append("""
+                EXISTS (
+                    SELECT 1 FROM visits_declaration vd_filter 
+                    WHERE vd_filter.visit_id = dv.origin_id::varchar 
+                    AND vd_filter.representative_voen ILIKE %(rep_voen)s
+                )
+            """)
+            params['rep_voen'] = f"%{request.GET['representative_voen']}%"
 
-        if representative_voen:
-            where_conditions.append(f"""EXISTS (
-                SELECT 1 FROM visits_declaration vdecl 
-                WHERE vdecl.visit_id = dv.origin_id::varchar 
-                AND vdecl.representative_voen ILIKE '%{representative_voen}%'
-            )""")
+        # 8. Represented Party Name (Company Name)
+        if request.GET.get('represented_party_name'):
+            where.append("""
+                EXISTS (
+                    SELECT 1 FROM visits_declaration vd_filter 
+                    WHERE vd_filter.visit_id = dv.origin_id::varchar 
+                    AND vd_filter.company_name ILIKE %(party_name)s
+                )
+            """)
+            params['party_name'] = f"%{request.GET['represented_party_name']}%"
 
-        if represented_party_name:
-            where_conditions.append(f"""EXISTS (
-                SELECT 1 FROM visits_declaration vdecl 
-                WHERE vdecl.visit_id = dv.origin_id::varchar 
-                AND vdecl.company_name ILIKE '%{represented_party_name}%'
-            )""")
+        # 9. Represented Party VOEN (Company VOEN)
+        if request.GET.get('represented_party_voen'):
+            where.append("""
+                EXISTS (
+                    SELECT 1 FROM visits_declaration vd_filter 
+                    WHERE vd_filter.visit_id = dv.origin_id::varchar 
+                    AND vd_filter.company_voen ILIKE %(party_voen)s
+                )
+            """)
+            params['party_voen'] = f"%{request.GET['represented_party_voen']}%"
 
-        if represented_party_voen:
-            where_conditions.append(f"""EXISTS (
-                SELECT 1 FROM visits_declaration vdecl 
-                WHERE vdecl.visit_id = dv.origin_id::varchar 
-                AND vdecl.company_voen ILIKE '%{represented_party_voen}%'
-            )""")
-
-        where_sql = " AND ".join(where_conditions)
+        # Construct WHERE clause
+        # Default condition to ensure we only look at valid customer-linked visits
+        base_condition = "dv.custom_1 IS NOT NULL"
+        where_sql = " AND ".join(where)
+        if where_sql:
+            final_where = f"{base_condition} AND {where_sql}"
+        else:
+            final_where = base_condition
 
         # ---- Main Query ----
         query = f"""
@@ -1652,10 +1663,10 @@ class StatisticsApi(APIView):
             LEFT JOIN fact_visit_transaction fvt ON dv.id = fvt.visit_key
             LEFT JOIN stat.dim_customer dc ON dc.id::varchar = dv.custom_1
             LEFT JOIN stat.dim_branch db ON db.id = fvt.branch_key
-            WHERE {where_sql}
+            WHERE {final_where}
             GROUP BY dv.id, dv.ticket_id, dv.created_timestamp
             ORDER BY dv.created_timestamp DESC
-            LIMIT {pg_size} OFFSET {offset}
+            LIMIT %(pg_size)s OFFSET %(offset)s
         """
 
         # ---- Count Query ----
@@ -1667,16 +1678,22 @@ class StatisticsApi(APIView):
                 LEFT JOIN fact_visit_transaction fvt ON dv.id = fvt.visit_key
                 LEFT JOIN stat.dim_customer dc ON dc.id::varchar = dv.custom_1
                 LEFT JOIN stat.dim_branch db ON db.id = fvt.branch_key
-                WHERE {where_sql}
+                WHERE {final_where}
                 GROUP BY dv.id
             ) AS sub
         """
 
+        # Add pagination params
+        params.update({
+            'pg_size': pg_size,
+            'offset': offset
+        })
+
         # ---- Execution ----
-        cursor.execute(query)
+        cursor.execute(query, params)
         data = convert_data(cursor)
 
-        cursor.execute(count_query)
+        cursor.execute(count_query, params)
         total = cursor.fetchone()[0]
         cursor.close()
 
@@ -1687,6 +1704,8 @@ class StatisticsApi(APIView):
             "data": result,
             "count": total
         })
+
+
 class RiskFinUpdateApi(APIView):
     """
     API endpoint for updating or inserting risk FIN records.
