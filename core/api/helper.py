@@ -27,9 +27,11 @@ def parse_time(time_string):
     else:
         return None
 
+
 def convert_data_to_json(data):
     """
     Processes flat SQL rows into a structured JSON format pairing Start/End events.
+    Output is flattened where each event in the flow becomes a separate object.
     """
     STARTERS = {'VISIT_CREATE', 'VISIT_CALL'}
     ENDERS = {
@@ -86,7 +88,7 @@ def convert_data_to_json(data):
                 'event_timestamp': row.get('event_timestamp')
             })
 
-    # 2. Process Events to generate the correct 'Flow'
+    # 2. Process Events to generate the correct 'Flow' and Flatten Output
     result = []
 
     for tx_id, group in grouped_data.items():
@@ -164,10 +166,32 @@ def convert_data_to_json(data):
                     processed_flow.append(call_entry)
                     i += 1
 
-        # Construct the final transaction object
-        transaction_obj = group['meta']
-        transaction_obj['notes'] = group['notes']
-        transaction_obj['flow'] = processed_flow
-        result.append(transaction_obj)
+        # Construct the flattened result objects
+        meta = group['meta']
+
+        # Prepare common base data
+        base_item = {
+            "id": meta['id'],
+            "create_timestamp": meta['create_timestamp'],
+            "waiting_time": meta['waiting_time'],
+            "call_timestamp": meta['call_timestamp'],
+            "transaction_time": meta['transaction_time'],
+            "outcome_key": meta['outcome_key'],
+            # Flatten staff fields
+            "first_name": meta['staff']['first_name'],
+            "last_name": meta['staff']['last_name'],
+            "name": meta['staff']['name'],
+        }
+
+        # Determine note content (singular object or null)
+        note_data = group['notes'][0] if group['notes'] else None
+
+        # Iterate through processed flow to create individual entries
+        for flow_event in processed_flow:
+            new_item = base_item.copy()
+            new_item['note'] = note_data
+            # Merge flow specific keys (operation, event_timestamp, start_timestamp, etc.)
+            new_item.update(flow_event)
+            result.append(new_item)
 
     return result
