@@ -1,8 +1,8 @@
 from rest_framework.views import APIView
 from rest_framework.response import Response
-
-from core.api.helper import convert_data, parse_time
-from core.api.serializers import StatisticsApiSerializer, CustomerAllExportSerializer, CustomerAllSerializer, CustomerSerializer, \
+from core.api.helper import convert_data, parse_time, convert_data_to_json
+from core.api.serializers import StatisticsApiSerializer, CustomerAllExportSerializer, CustomerAllSerializer, \
+    CustomerSerializer, \
     StatisticExportSerializer, StatisticSerializer, TransactionDataSerializer, VisitExportSerializer, VisitSerializer
 from ..mrz_input import get_id_data
 from requests.auth import HTTPBasicAuth
@@ -990,7 +990,6 @@ class Export(APIView):
         selected_father_name = request.GET.get('father_name')
         selected_columns = request.query_params.get('selected_columns')
 
-
         cursor = get_connection()
         if data_url == "report":
             call_min_date_selected = request.GET.get('callMinDateSelected', None)
@@ -1326,25 +1325,30 @@ class TransactionList(APIView):
             return Response({'Customer': 'Customer not found!'}, status=status.HTTP_404_NOT_FOUND)
 
         query = f"""
-            SELECT * FROM (
-                SELECT DISTINCT ON (fvt.id)
+            SELECT
                 fvt.id, fvt.create_timestamp, fvt.waiting_time, fvt.call_timestamp ,fvt.transaction_time, fvt.outcome_key,
                 ds.first_name,ds.last_name,ds.name,
                 vn.content as note,
-                vn.status as result,
+                CASE vn.status
+                    WHEN 0 THEN 'Müraciət təmin edilmədi'
+                    WHEN 1 THEN 'Müraciət təmin edildi'
+                    WHEN 2 THEN 'Müraciət qismən təmin edildi'
+                    WHEN 3 THEN 'Xitam verildi'
+                    ELSE 'Naməlum'
+                END AS "status",
                 vn.table as table,
-                dvet.name as status
+                dvet.name as operation,
+                fve.event_timestamp
                 from fact_visit_transaction AS fvt
-                left join stat.dim_visit dv on dv.id = fvt.visit_key 
-                left join stat.dim_customer dc on dc.id::varchar = dv.custom_1
-                left join stat.dim_staff ds on ds.id = fvt.staff_key 
-                left join visits_note vn on vn.user_id::integer = ds.origin_id AND vn.visit_id = dv.origin_id::varchar
-                left join fact_visit_events fve on fve.visit_transaction_id = fvt.id
-                left join dim_visit_event_type dvet on dvet.id = fve.visit_event_type_key
-                where fvt.visit_key = '{visit_id}'
+                     left join stat.dim_visit dv on dv.id = fvt.visit_key
+                     left join stat.dim_customer dc on dc.id::varchar = dv.custom_1
+                     left join stat.dim_staff ds on ds.id = fvt.staff_key
+                     left join visits_note vn on vn.user_id::integer = ds.origin_id AND vn.visit_id = dv.origin_id::varchar
+                     left join fact_visit_events fve on fve.visit_key = fvt.visit_key
+                     left join dim_visit_event_type dvet on dvet.id = fve.visit_event_type_key
+                WHERE fvt.visit_key = {visit_id}
+                    AND (dvet.name IS NULL OR dvet.name <> 'VISIT_NEXT')
                 ORDER BY fvt.id, vn.created_at DESC
-            ) AS subquery
-            ORDER BY id
             OFFSET {pg_size} * ({pg_num} - 1) LIMIT {pg_size}
         """
         count_query = f"""
@@ -1360,10 +1364,11 @@ class TransactionList(APIView):
 
         cursor.execute(query)
         data = convert_data(cursor)
-        data = TransactionDataSerializer(data, many=True).data
+        # data = TransactionDataSerializer(data, many=True).data
         cursor.execute(count_query)
         count = cursor.fetchall()
 
+        structured_data = convert_data_to_json(data)
         # Get profile data with risk status
         # Use phone, birth_date and image from visits_visit if available, otherwise from dim_customer
         profile_query = f"""
@@ -1400,19 +1405,40 @@ class TransactionList(APIView):
 
         # Fetch declarations for the visit using origin_id
         declarations_query = f"""
-            SELECT 
-                visit_id,
-                id,
-                user_id,
-                type,
-                customs_number,
-                representative_voen,
-                representative_name,
-                company_voen,
-                company_name,
-                created_at
-            FROM visits_declaration
-            WHERE visit_id = %s
+            SELECT
+                vd.visit_id,
+                vd.id,
+                vd.user_id,
+                vd.type,
+                vd.customs_number,
+                vd.representative_voen,
+                vd.representative_name,
+                vd.company_voen,
+                vd.company_name,
+                vd.created_at,
+                fvt.transaction_time,
+                
+                CASE vn.status
+                    WHEN 0 THEN 'Müraciət təmin edilmədi'
+                    WHEN 1 THEN 'Müraciət təmin edildi'
+                    WHEN 2 THEN 'Müraciət qismən təmin edildi'
+                    WHEN 3 THEN 'Xitam verildi'
+                    ELSE 'Naməlum'
+                END AS "status",
+                
+                vn.action as result,
+                
+                (SELECT s_ds.name 
+                 FROM fact_visit_transaction s_fvt
+                 INNER JOIN dim_service AS s_ds ON s_ds.id = s_fvt.service_key
+                 WHERE s_fvt.visit_key = dv.id
+                 ORDER BY s_fvt.create_timestamp LIMIT 1) AS service_name
+                 
+                FROM visits_declaration as vd
+                    LEFT JOIN dim_visit dv ON dv.origin_id = vd.visit_id::bigint
+                    LEFT JOIN fact_visit_transaction fvt ON fvt.visit_key = dv.id
+                    LEFT JOIN visits_note vn ON vn.visit_id = vd.visit_id
+            WHERE vd.visit_id = %s
             ORDER BY created_at DESC
         """
         # Use origin_id instead of visit_id for declarations
@@ -1435,6 +1461,10 @@ class TransactionList(APIView):
                 'representative_name': decl['representative_name'],
                 'company_voen': decl['company_voen'],
                 'company_name': decl['company_name'],
+                'transaction_time': decl['transaction_time'],
+                'service_name': decl['service_name'],
+                'status': decl['status'],
+                'result': decl['result'],
                 'created_at': decl['created_at'].isoformat() if decl.get('created_at') else None
             })
 
@@ -1444,7 +1474,7 @@ class TransactionList(APIView):
         visit_data['created_timestamp'] = converted_date
 
         all = {
-            "data": data,
+            "data": structured_data,
             "visit_data": visit_data,
             "profile_data": profile_data,
             "declarations": declarations,
@@ -1699,12 +1729,13 @@ class StatisticsApi(APIView):
             "count": total
         })
 
+
 class RiskFinUpdateApi(APIView):
     """
     API endpoint for updating or inserting risk FIN records.
     Updates in both statdb and qp_agent databases.
     If FIN exists in table, updates it; otherwise inserts new record.
-    
+
     Parameters:
         - fin: FIN code (required)
         - is_risk: Boolean flag indicating if FIN is at risk (default: False)
@@ -1898,7 +1929,7 @@ class AudioRecordingApi(APIView):
     """
     API endpoint for retrieving OPUS audio recordings from Samba server.
     Returns OPUS audio file directly (no encryption).
-    
+
     Parameters:
         - date: Recording date in YYYY-MM-DD format (required)
         - transaction_id: Transaction ID (required)
@@ -2042,3 +2073,5 @@ class AudioRecordingApi(APIView):
                 {"error": f"Internal server error: {str(e)}"},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
+
+

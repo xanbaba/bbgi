@@ -8,7 +8,7 @@ urlpatterns = [
     path('customer-list/', CustomerList.as_view()),
     path('visit-list-customer/', VisitListOfCustomer.as_view()), 
     path('export/', Export.as_view()), 
-    path('transactions/<int:visit_id>',TransactionList.as_view()),
+    path('transactions/<int:visit_id>/',TransactionList.as_view()),
     path('services',ServiceListApi.as_view()),
     path('branches',BranchListApi.as_view()),
     path('risk-fin/', RiskFinUpdateApi.as_view()),
