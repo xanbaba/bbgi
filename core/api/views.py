@@ -1296,7 +1296,6 @@ class Export(APIView):
 
 
 class TransactionList(APIView):
-
     def get(self, request, visit_id):
         cursor = get_connection()
 
@@ -1516,6 +1515,28 @@ class TransactionList(APIView):
 
         return Response(all)
 
+
+class VisitsList(APIView):
+    def get(self, request, visit_id):
+        cursor = get_connection()
+
+        query = """
+            SELECT DISTINCT
+                dv.id,
+                dv.ticket_id
+            FROM visits_declaration vd1
+                JOIN visits_declaration vd2
+                    ON vd1.customs_number = vd2.customs_number
+                JOIN dim_visit dv
+                    ON dv.origin_id = vd2.visit_id::bigint
+            WHERE vd1.visit_id::bigint = %s
+              AND vd2.visit_id::bigint <> %s;
+        """
+        cursor.execute(query, (visit_id, visit_id))
+        data = convert_data(cursor)
+
+        cursor.close()
+        return Response(data)
 
 class ServiceListApi(APIView):
     def get(self, request):
