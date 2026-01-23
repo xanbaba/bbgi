@@ -1325,30 +1325,77 @@ class TransactionList(APIView):
             return Response({'Customer': 'Customer not found!'}, status=status.HTTP_404_NOT_FOUND)
 
         query = f"""
+            WITH event_flow AS (
+                SELECT
+                    dim_visit_event_type.name,
+                    dim_visit.ticket_id,
+                    dim_visit.origin_id,
+                    dim_staff.first_name,
+                    dim_staff.last_name,
+                    -- Added visit_transaction_id to the CTE
+                    fact_visit_events.visit_transaction_id,
+                    fact_visit_events.event_timestamp,
+                    -- Time the current action ends
+                    LEAD(fact_visit_events.event_timestamp) OVER (ORDER BY fact_visit_events.event_timestamp) AS next_action_timestamp,
+                    -- What the next action is
+                    LEAD(dim_visit_event_type.name) OVER (ORDER BY fact_visit_events.event_timestamp) AS next_action,
+                    -- The timestamp of the previous event to calculate waiting time for CALLS
+                    LAG(fact_visit_events.event_timestamp) OVER (ORDER BY fact_visit_events.event_timestamp) AS prev_event_timestamp
+                FROM fact_visit_events
+                         LEFT JOIN dim_visit_event_type ON dim_visit_event_type.id = fact_visit_events.visit_event_type_key
+                         LEFT JOIN dim_visit ON dim_visit.id = fact_visit_events.visit_key
+                         LEFT JOIN dim_staff ON dim_staff.id = fact_visit_events.staff_key
+                WHERE fact_visit_events.visit_key = {visit_id}
+                  AND dim_visit_event_type.name NOT IN ('VISIT_NEXT', 'VISIT_END_TRANSACTION')
+            )
             SELECT
-                fvt.id, fvt.create_timestamp, fvt.waiting_time, fvt.call_timestamp ,fvt.transaction_time, fvt.outcome_key,
-                ds.first_name,ds.last_name,ds.name,
-                vn.content as note,
-                CASE vn.status
-                    WHEN 0 THEN 'Müraciət təmin edilmədi'
-                    WHEN 1 THEN 'Müraciət təmin edildi'
-                    WHEN 2 THEN 'Müraciət qismən təmin edildi'
-                    WHEN 3 THEN 'Xitam verildi'
-                    ELSE 'Naməlum'
-                END AS "status",
-                vn.table as table,
-                dvet.name as operation,
-                fve.event_timestamp
-                from fact_visit_transaction AS fvt
-                     left join stat.dim_visit dv on dv.id = fvt.visit_key
-                     left join stat.dim_customer dc on dc.id::varchar = dv.custom_1
-                     left join stat.dim_staff ds on ds.id = fvt.staff_key
-                     left join visits_note vn on vn.user_id::integer = ds.origin_id AND vn.visit_id = dv.origin_id::varchar
-                     left join fact_visit_events fve on fve.visit_key = fvt.visit_key
-                     left join dim_visit_event_type dvet on dvet.id = fve.visit_event_type_key
-                WHERE fvt.visit_key = {visit_id}
-                    AND (dvet.name IS NULL OR dvet.name <> 'VISIT_NEXT')
-                ORDER BY fvt.id, vn.created_at DESC
+                f.name,
+                f.ticket_id,
+                -- Showing the Transaction ID in the results
+                f.visit_transaction_id,
+                f.first_name,
+                f.last_name,
+                f.event_timestamp,
+                f.next_action_timestamp,
+                -- WAITING TIME: From Create/Transfer/Park until this Call starts
+                CASE
+                    WHEN f.name = 'VISIT_CALL' THEN EXTRACT(EPOCH FROM (f.event_timestamp - f.prev_event_timestamp))::INT
+                    ELSE NULL
+                    END AS waiting_time_sec,
+                -- SERVING TIME: From Call until the next action (Park/Transfer/End)
+                CASE
+                    WHEN f.name = 'VISIT_CALL' THEN EXTRACT(EPOCH FROM (f.next_action_timestamp - f.event_timestamp))::INT
+                    ELSE NULL
+                    END AS serving_time_sec,
+                f.next_action,
+                COALESCE(notes.source_table, 'RECEPTION') AS note_table,
+                notes.status_description,
+                notes.content AS staff_note
+            FROM event_flow f
+                     LEFT JOIN (
+                SELECT DISTINCT
+                    visit_id,
+                    "table" AS source_table,
+                    content,
+                    CASE
+                        WHEN status = 0 THEN 'Müraciət təmin edilmədi'
+                        WHEN status = 1 THEN 'Müraciət təmin edildi'
+                        WHEN status = 2 THEN 'Müraciət qismən təmin edildi'
+                        WHEN status = 3 THEN 'Xitam verildi'
+                        ELSE ' '
+                        END AS status_description,
+                    CASE
+                        WHEN action = 'reception' THEN 'VISIT_CREATE'
+                        WHEN action = 'park'      THEN 'VISIT_TRANSFER_TO_USER_POOL'
+                        WHEN action = 'transfer'  THEN 'VISIT_TRANSFER_TO_QUEUE'
+                        WHEN action = 'finish'    THEN 'VISIT_END'
+                        ELSE action
+                        END AS matched_name
+                FROM stat.visits_note
+            ) notes ON notes.visit_id = CAST(f.origin_id AS VARCHAR)
+                AND (notes.matched_name = f.name OR notes.matched_name = f.next_action)
+            WHERE f.name IN ('VISIT_CREATE', 'VISIT_CALL')
+            ORDER BY f.event_timestamp
             OFFSET {pg_size} * ({pg_num} - 1) LIMIT {pg_size}
         """
         count_query = f"""
@@ -1367,8 +1414,6 @@ class TransactionList(APIView):
         # data = TransactionDataSerializer(data, many=True).data
         cursor.execute(count_query)
         count = cursor.fetchall()
-
-        structured_data = convert_data_to_json(data)
         # Get profile data with risk status
         # Use phone, birth_date and image from visits_visit if available, otherwise from dim_customer
         profile_query = f"""
@@ -1418,16 +1463,6 @@ class TransactionList(APIView):
                 vd.created_at,
                 fvt.transaction_time,
                 
-                CASE vn.status
-                    WHEN 0 THEN 'Müraciət təmin edilmədi'
-                    WHEN 1 THEN 'Müraciət təmin edildi'
-                    WHEN 2 THEN 'Müraciət qismən təmin edildi'
-                    WHEN 3 THEN 'Xitam verildi'
-                    ELSE 'Naməlum'
-                END AS "status",
-                
-                vn.action as result,
-                
                 (SELECT s_ds.name 
                  FROM fact_visit_transaction s_fvt
                  INNER JOIN dim_service AS s_ds ON s_ds.id = s_fvt.service_key
@@ -1437,7 +1472,6 @@ class TransactionList(APIView):
                 FROM visits_declaration as vd
                     LEFT JOIN dim_visit dv ON dv.origin_id = vd.visit_id::bigint
                     LEFT JOIN fact_visit_transaction fvt ON fvt.visit_key = dv.id
-                    LEFT JOIN visits_note vn ON vn.visit_id = vd.visit_id
             WHERE vd.visit_id = %s
             ORDER BY created_at DESC
         """
@@ -1463,8 +1497,6 @@ class TransactionList(APIView):
                 'company_name': decl['company_name'],
                 'transaction_time': decl['transaction_time'],
                 'service_name': decl['service_name'],
-                'status': decl['status'],
-                'result': decl['result'],
                 'created_at': decl['created_at'].isoformat() if decl.get('created_at') else None
             })
 
@@ -1474,7 +1506,7 @@ class TransactionList(APIView):
         visit_data['created_timestamp'] = converted_date
 
         all = {
-            "data": structured_data,
+            "data": data,
             "visit_data": visit_data,
             "profile_data": profile_data,
             "declarations": declarations,
@@ -1949,6 +1981,9 @@ class AudioRecordingApi(APIView):
             share = settings.SAMBA_SHARE_NAME
             username = settings.SAMBA_USERNAME
             password = settings.SAMBA_PASSWORD
+
+            print(12345678)
+            print(server, share, username, password)
 
             # Fayl yolu: recordings/YYYY-MM-DD/transaction_id.opus (forward slash istifadə et)
             file_path = f"recordings/{date}/{transaction_id}.opus"

@@ -16,6 +16,7 @@ services:
       - LANG=en_US.UTF-8
       - LANGUAGE=en_US:en
       - LC_ALL=en_US.UTF-8
+      - DOCKER_API_VERSION=1.52
     volumes:
       - .:/code
       - ./media:/code/media
