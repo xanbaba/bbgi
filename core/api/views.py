@@ -964,7 +964,6 @@ class VisitListOfCustomer(APIView):
                 'notCalled': stats_data[0].get('not_called', 0)
             }
 
-        print(result)
         for item in result:
             transaction_query = f"""
                                 WITH event_flow AS (
@@ -1537,13 +1536,10 @@ class TransactionList(APIView):
                 vd.id,
                 vd.user_id,
                 vd.type,
-                vd.customs_number,
                 vd.representative_voen,
                 vd.representative_name,
                 vd.company_voen,
                 vd.company_name,
-                vd.created_at,
-                fvt.transaction_time,
                 
                 (SELECT s_ds.name 
                  FROM fact_visit_transaction s_fvt
@@ -1553,7 +1549,6 @@ class TransactionList(APIView):
                  
                 FROM visits_declaration as vd
                     LEFT JOIN dim_visit dv ON dv.origin_id = vd.visit_id::bigint
-                    LEFT JOIN fact_visit_transaction fvt ON fvt.visit_key = dv.id
             WHERE vd.visit_id = %s
             ORDER BY created_at DESC
         """
@@ -1570,16 +1565,12 @@ class TransactionList(APIView):
         for decl in declarations_data:
             declarations.append({
                 'id': decl['id'],
-                'user_id': decl['user_id'],
                 'type': decl['type'],
-                'customs_number': decl['customs_number'],
                 'representative_voen': decl['representative_voen'],
                 'representative_name': decl['representative_name'],
                 'company_voen': decl['company_voen'],
                 'company_name': decl['company_name'],
-                'transaction_time': decl['transaction_time'],
                 'service_name': decl['service_name'],
-                'created_at': decl['created_at'].isoformat() if decl.get('created_at') else None
             })
 
         extract_integer = lambda x: x[0] if isinstance(x, tuple) else x
@@ -1861,10 +1852,91 @@ class StatisticsApi(APIView):
 
         cursor.execute(count_query, params)
         total = cursor.fetchone()[0]
-        cursor.close()
+        # cursor.close()
 
         # ---- Serialization ----
         result = StatisticsApiSerializer(data, many=True).data
+
+        for item in result:
+            transaction_query = f"""
+                                WITH event_flow AS (
+                                    SELECT
+                                        dim_visit_event_type.name,
+                                        dim_visit.ticket_id,
+                                        dim_visit.origin_id,
+                                        dim_staff.first_name,
+                                        dim_staff.last_name,
+                                        -- Added visit_transaction_id to the CTE
+                                        fact_visit_events.visit_transaction_id,
+                                        fact_visit_events.event_timestamp,
+                                        -- Time the current action ends
+                                        LEAD(fact_visit_events.event_timestamp) OVER (ORDER BY fact_visit_events.event_timestamp) AS next_action_timestamp,
+                                        -- What the next action is
+                                        LEAD(dim_visit_event_type.name) OVER (ORDER BY fact_visit_events.event_timestamp) AS next_action,
+                                        -- The timestamp of the previous event to calculate waiting time for CALLS
+                                        LAG(fact_visit_events.event_timestamp) OVER (ORDER BY fact_visit_events.event_timestamp) AS prev_event_timestamp
+                                    FROM fact_visit_events
+                                             LEFT JOIN dim_visit_event_type ON dim_visit_event_type.id = fact_visit_events.visit_event_type_key
+                                             LEFT JOIN dim_visit ON dim_visit.id = fact_visit_events.visit_key
+                                             LEFT JOIN dim_staff ON dim_staff.id = fact_visit_events.staff_key
+                                    WHERE fact_visit_events.visit_key = {item["id"]}
+                                      AND dim_visit_event_type.name NOT IN ('VISIT_NEXT', 'VISIT_END_TRANSACTION')
+                                )
+                                SELECT
+                                    f.name,
+                                    f.ticket_id,
+                                    -- Showing the Transaction ID in the results
+                                    f.visit_transaction_id,
+                                    f.first_name,
+                                    f.last_name,
+                                    f.event_timestamp,
+                                    f.next_action_timestamp,
+                                    -- WAITING TIME: From Create/Transfer/Park until this Call starts
+                                    CASE
+                                        WHEN f.name = 'VISIT_CALL' THEN EXTRACT(EPOCH FROM (f.event_timestamp - f.prev_event_timestamp))::INT
+                                        ELSE NULL
+                                        END AS waiting_time_sec,
+                                    -- SERVING TIME: From Call until the next action (Park/Transfer/End)
+                                    CASE
+                                        WHEN f.name = 'VISIT_CALL' THEN EXTRACT(EPOCH FROM (f.next_action_timestamp - f.event_timestamp))::INT
+                                        ELSE NULL
+                                        END AS serving_time_sec,
+                                    f.next_action,
+                                    COALESCE(notes.source_table, 'RECEPTION') AS note_table,
+                                    notes.status_description,
+                                    notes.content AS staff_note
+                                FROM event_flow f
+                                         LEFT JOIN (
+                                    SELECT DISTINCT
+                                        visit_id,
+                                        "table" AS source_table,
+                                        content,
+                                        CASE
+                                            WHEN status = 0 THEN 'Müraciət təmin edilmədi'
+                                            WHEN status = 1 THEN 'Müraciət təmin edildi'
+                                            WHEN status = 2 THEN 'Müraciət qismən təmin edildi'
+                                            WHEN status = 3 THEN 'Xitam verildi'
+                                            ELSE ' '
+                                            END AS status_description,
+                                        CASE
+                                            WHEN action = 'reception' THEN 'VISIT_CREATE'
+                                            WHEN action = 'park'      THEN 'VISIT_TRANSFER_TO_USER_POOL'
+                                            WHEN action = 'transfer'  THEN 'VISIT_TRANSFER_TO_QUEUE'
+                                            WHEN action = 'finish'    THEN 'VISIT_END'
+                                            ELSE action
+                                            END AS matched_name
+                                    FROM stat.visits_note
+                                ) notes ON notes.visit_id = CAST(f.origin_id AS VARCHAR)
+                                    AND (notes.matched_name = f.name OR notes.matched_name = f.next_action)
+                                WHERE f.name IN ('VISIT_CREATE', 'VISIT_CALL')
+                                ORDER BY f.event_timestamp DESC
+                                LIMIT 1;
+                            """
+            cursor.execute(transaction_query)
+            temp = convert_data(cursor)
+            print(temp)
+            item["result"] = temp[0]["status_description"]
+            item["status"] = temp[0]["next_action"]
 
         return Response({
             "data": result,
