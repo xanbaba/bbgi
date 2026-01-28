@@ -1,6 +1,6 @@
 from rest_framework.views import APIView
 from rest_framework.response import Response
-from core.api.helper import convert_data, parse_time, convert_data_to_json
+from core.api.helper import convert_data, parse_time, transactionNamings
 from core.api.serializers import StatisticsApiSerializer, CustomerAllExportSerializer, CustomerAllSerializer, \
     CustomerSerializer, \
     StatisticExportSerializer, StatisticSerializer, TransactionDataSerializer, VisitExportSerializer, VisitSerializer
@@ -1046,8 +1046,6 @@ class VisitListOfCustomer(APIView):
                             """
             cursor.execute(transaction_query)
             temp = convert_data(cursor)
-            print("temp")
-            print(temp)
             item["result"] = temp[0]["status_description"]
             item["status"] = temp[0]["next_action"]
 
@@ -1240,26 +1238,81 @@ class Export(APIView):
 
         elif data_url == "visit-list-customer":
             query = f"""
-                SELECT 
-                    dv.id AS visit_key,
-                    COUNT(fvt.id) AS transactions_count,
-                    dc.first_name, dc.last_name, dc.pin, 
-                dv.ticket_id,
-                dv.created_timestamp,
-                sum(fvt.transaction_time) as total_transaction_time, 
-                    sum(fvt.waiting_time) as total_wait_time,
-                (SELECT s_ds.name FROM fact_visit_transaction s_fvt
-                INNER JOIN dim_service AS s_ds ON s_ds.id = s_fvt.service_key
-                WHERE s_fvt.visit_key = dv.id
-                    ORDER BY create_timestamp LIMIT 1) 
-                    AS service_name
-                FROM 
-                    dim_visit dv
-                left join fact_visit_transaction fvt ON dv.id = fvt.visit_key
-                left join stat.dim_customer dc on dc.id::varchar = dv.custom_1
-                where dv.custom_1 is not null
+                    SELECT 
+                        dv.id AS visit_key,
+                        dv.origin_id AS visit_origin_id,
+                        COUNT(fvt.id) AS transactions_count,
+                        dc.first_name, 
+                        dc.last_name, 
+                        dc.pin,
+                        dv.ticket_id,
+                        dv.created_timestamp,
+                        -- Added: formatted date for display
+                        TO_CHAR(TO_TIMESTAMP(dv.created_timestamp / 1000), 'DD.MM.YYYY HH24:MI') AS created_date,
 
-            """
+                        SUM(fvt.transaction_time) AS total_transaction_time, 
+                        SUM(fvt.waiting_time) AS total_wait_time,
+
+                        TO_CHAR(
+                            (COALESCE(SUM(fvt.transaction_time), 0) + COALESCE(SUM(fvt.waiting_time), 0)) * INTERVAL '1 second',
+                            'HH24:MI:SS'
+                        ) AS total_visit_time,
+
+                        (SELECT vd.customs_number 
+                         FROM visits_declaration vd
+                         WHERE vd.visit_id = dv.origin_id::varchar
+                         ORDER BY vd.created_at DESC LIMIT 1) AS declaration,
+
+                        (SELECT vd.type 
+                         FROM visits_declaration vd
+                         WHERE vd.visit_id = dv.origin_id::varchar
+                         ORDER BY vd.created_at DESC LIMIT 1) AS representation,
+
+                        (SELECT vd.representative_name 
+                         FROM visits_declaration vd
+                         WHERE vd.visit_id = dv.origin_id::varchar
+                         ORDER BY vd.created_at DESC LIMIT 1) AS representative_name,
+
+                        (SELECT vd.representative_voen 
+                         FROM visits_declaration vd
+                         WHERE vd.visit_id = dv.origin_id::varchar
+                         ORDER BY vd.created_at DESC LIMIT 1) AS representative_voen,
+
+                        (SELECT vd.company_name 
+                         FROM visits_declaration vd
+                         WHERE vd.visit_id = dv.origin_id::varchar
+                         ORDER BY vd.created_at DESC LIMIT 1) AS represented_party_name,
+
+                        (SELECT vd.company_voen 
+                         FROM visits_declaration vd
+                         WHERE vd.visit_id = dv.origin_id::varchar
+                         ORDER BY vd.created_at DESC LIMIT 1) AS represented_party_voen,
+
+                        (SELECT s_ds.name 
+                         FROM fact_visit_transaction s_fvt
+                         INNER JOIN dim_service AS s_ds ON s_ds.id = s_fvt.service_key
+                         WHERE s_fvt.visit_key = dv.id
+                         ORDER BY s_fvt.create_timestamp LIMIT 1) AS service_name,
+
+                        (SELECT vn.status 
+                         FROM visits_note vn
+                         WHERE vn.visit_id = dv.id::varchar 
+                           AND vn.action = 'finish'
+                         ORDER BY vn.created_at ASC LIMIT 1) AS result,
+
+                        (SELECT dvet.name 
+                         FROM fact_visit_transaction s_fvt
+                         LEFT JOIN fact_visit_events s_fve ON s_fve.visit_transaction_id = s_fvt.id
+                         LEFT JOIN dim_visit_event_type dvet ON dvet.id = s_fve.visit_event_type_key
+                         WHERE s_fvt.visit_key = dv.id
+                         ORDER BY s_fvt.create_timestamp DESC LIMIT 1) AS status
+
+                        FROM dim_visit dv
+                        LEFT JOIN fact_visit_transaction fvt ON dv.id = fvt.visit_key
+                        LEFT JOIN stat.dim_customer dc ON dc.id::varchar = dv.custom_1
+                        WHERE dv.custom_1 IS NOT NULL
+                    """
+
             if min_date_selected and max_date_selected:
                 query += f"AND fvt.date_key BETWEEN {min_date_selected} AND {max_date_selected} "
 
@@ -1289,8 +1342,88 @@ class Export(APIView):
             cursor = get_connection()
             cursor.execute(query)
             data = convert_data(cursor)
-            result = VisitExportSerializer(data, many=True).data
+            for item in data:
+                print(item)
+                transaction_query = f"""
+                                    WITH event_flow AS (
+                                        SELECT
+                                            dim_visit_event_type.name,
+                                            dim_visit.ticket_id,
+                                            dim_visit.origin_id,
+                                            dim_staff.first_name,
+                                            dim_staff.last_name,
+                                            -- Added visit_transaction_id to the CTE
+                                            fact_visit_events.visit_transaction_id,
+                                            fact_visit_events.event_timestamp,
+                                            -- Time the current action ends
+                                            LEAD(fact_visit_events.event_timestamp) OVER (ORDER BY fact_visit_events.event_timestamp) AS next_action_timestamp,
+                                            -- What the next action is
+                                            LEAD(dim_visit_event_type.name) OVER (ORDER BY fact_visit_events.event_timestamp) AS next_action,
+                                            -- The timestamp of the previous event to calculate waiting time for CALLS
+                                            LAG(fact_visit_events.event_timestamp) OVER (ORDER BY fact_visit_events.event_timestamp) AS prev_event_timestamp
+                                        FROM fact_visit_events
+                                                 LEFT JOIN dim_visit_event_type ON dim_visit_event_type.id = fact_visit_events.visit_event_type_key
+                                                 LEFT JOIN dim_visit ON dim_visit.id = fact_visit_events.visit_key
+                                                 LEFT JOIN dim_staff ON dim_staff.id = fact_visit_events.staff_key
+                                        WHERE fact_visit_events.visit_key = {item["visit_key"]}
+                                          AND dim_visit_event_type.name NOT IN ('VISIT_NEXT', 'VISIT_END_TRANSACTION')
+                                    )
+                                    SELECT
+                                        f.name,
+                                        f.ticket_id,
+                                        -- Showing the Transaction ID in the results
+                                        f.visit_transaction_id,
+                                        f.first_name,
+                                        f.last_name,
+                                        f.event_timestamp,
+                                        f.next_action_timestamp,
+                                        -- WAITING TIME: From Create/Transfer/Park until this Call starts
+                                        CASE
+                                            WHEN f.name = 'VISIT_CALL' THEN EXTRACT(EPOCH FROM (f.event_timestamp - f.prev_event_timestamp))::INT
+                                            ELSE NULL
+                                            END AS waiting_time_sec,
+                                        -- SERVING TIME: From Call until the next action (Park/Transfer/End)
+                                        CASE
+                                            WHEN f.name = 'VISIT_CALL' THEN EXTRACT(EPOCH FROM (f.next_action_timestamp - f.event_timestamp))::INT
+                                            ELSE NULL
+                                            END AS serving_time_sec,
+                                        f.next_action,
+                                        COALESCE(notes.source_table, 'RECEPTION') AS note_table,
+                                        notes.status_description,
+                                        notes.content AS staff_note
+                                    FROM event_flow f
+                                             LEFT JOIN (
+                                        SELECT DISTINCT
+                                            visit_id,
+                                            "table" AS source_table,
+                                            content,
+                                            CASE
+                                                WHEN status = 0 THEN 'Müraciət təmin edilmədi'
+                                                WHEN status = 1 THEN 'Müraciət təmin edildi'
+                                                WHEN status = 2 THEN 'Müraciət qismən təmin edildi'
+                                                WHEN status = 3 THEN 'Xitam verildi'
+                                                ELSE ' '
+                                                END AS status_description,
+                                            CASE
+                                                WHEN action = 'reception' THEN 'VISIT_CREATE'
+                                                WHEN action = 'park'      THEN 'VISIT_TRANSFER_TO_USER_POOL'
+                                                WHEN action = 'transfer'  THEN 'VISIT_TRANSFER_TO_QUEUE'
+                                                WHEN action = 'finish'    THEN 'VISIT_END'
+                                                ELSE action
+                                                END AS matched_name
+                                        FROM stat.visits_note
+                                    ) notes ON notes.visit_id = CAST(f.origin_id AS VARCHAR)
+                                        AND (notes.matched_name = f.name OR notes.matched_name = f.next_action)
+                                    WHERE f.name IN ('VISIT_CREATE', 'VISIT_CALL')
+                                    ORDER BY f.event_timestamp DESC
+                                    LIMIT 1;
+                                """
+                cursor.execute(transaction_query)
+                temp = convert_data(cursor)
+                item["result"] = temp[0]["status_description"]
+                item["status"] = transactionNamings[temp[0]["next_action"]]
 
+            result = VisitExportSerializer(data, many=True).data
 
 
         elif data_url == "visit-transaction":

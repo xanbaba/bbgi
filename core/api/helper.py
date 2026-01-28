@@ -1,5 +1,16 @@
 from collections import defaultdict
 
+transactionNamings = {
+    "VISIT_CREATE": "NOVBE YARADILDI",
+    "VISIT_CALL": "ÇAĞIRILDI",
+    "VISIT_TRANSFER_TO_QUEUE": "transfer",
+    "VISIT_TRANSFER_TO_SERVICE_POINT_POOL": "transfer",
+    "VISIT_TRANSFER_TO_USER_POOL": "park",
+    "VISIT_END": "basha catdi",
+    "VISIT_NOSHOW": "vetendas gelmedi",
+    "VISIT_REMOVE": "silindi",
+    "VISIT_RECYCLE": "yeninden novbeye qaytarildi",
+}
 
 def convert_data(cursor):
     columns = [col[0] for col in cursor.description]

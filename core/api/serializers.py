@@ -286,6 +286,7 @@ class CustomerAllExportSerializer(serializers.Serializer):
 
 
 class VisitExportSerializer(serializers.Serializer):
+    visit_key = serializers.CharField(max_length=100)
     first_name = serializers.CharField(max_length=100)
     last_name = serializers.CharField(max_length=100)
     pin = serializers.CharField(max_length=50)
