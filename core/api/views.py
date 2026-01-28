@@ -943,26 +943,31 @@ class VisitListOfCustomer(APIView):
         # Calculate statistics for the profile
         stats_query = f"""
             SELECT 
-                COUNT(DISTINCT dv.id) as total_visits,
-                COUNT(DISTINCT CASE WHEN dvet.name ILIKE '%XIDMET GOSTERILDI%' OR dvet.name ILIKE '%SERVICE PROVIDED%' THEN dv.id END) as service_provided,
-                COUNT(DISTINCT CASE WHEN dvet.name ILIKE '%GELMEDI%' OR dvet.name ILIKE '%DID NOT COME%' THEN dv.id END) as did_not_come,
-                COUNT(DISTINCT CASE WHEN dvet.name ILIKE '%CAGIRILMADI%' OR dvet.name ILIKE '%NOT CALLED%' THEN dv.id END) as not_called
-            FROM dim_visit dv
-            LEFT JOIN fact_visit_transaction fvt ON dv.id = fvt.visit_key
-            LEFT JOIN fact_visit_events fve ON fve.visit_transaction_id = fvt.id
-            LEFT JOIN dim_visit_event_type dvet ON dvet.id = fve.visit_event_type_key
+                -- toplam ziyaret
+                COUNT(CASE WHEN fve.visit_event_type_key = 1 THEN 1 END) AS totalVisits,
+            
+                -- xidmet gosterildi
+                COUNT(CASE WHEN fve.visit_event_type_key = 11 AND fve.staff_key != 21 THEN 1 END) AS serviceProvided,
+            
+                -- xidmet gosterilmedi
+                COUNT(CASE WHEN fve.visit_event_type_key = 11 AND fve.staff_key = 21 THEN 1 END) AS notCalled,
+            
+                -- gelmedi
+                COUNT(CASE WHEN fve.visit_event_type_key = 13 THEN 1 END) AS didNotCome,
+            
+                -- silindi
+                COUNT(CASE WHEN fve.visit_event_type_key = 14 THEN 1 END) AS silindi
+            
+            FROM fact_visit_events fve
+            INNER JOIN dim_visit dv ON dv.id = fve.visit_key 
             WHERE dv.custom_1 = '{selected_customer}'
+              AND fve.visit_event_type_key IN (1, 11, 13, 14);
         """
+
         cursor.execute(stats_query)
         stats_data = convert_data(cursor)
 
-        if stats_data:
-            profile_serializer_data['statistics'] = {
-                'totalVisits': stats_data[0].get('total_visits', 0),
-                'serviceProvided': stats_data[0].get('service_provided', 0),
-                'didNotCome': stats_data[0].get('did_not_come', 0),
-                'notCalled': stats_data[0].get('not_called', 0)
-            }
+        profile_serializer_data['statistics'] = stats_data[0]
 
         for item in result:
             transaction_query = f"""
