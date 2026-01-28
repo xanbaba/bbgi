@@ -1177,12 +1177,25 @@ class Export(APIView):
 
         elif data_url == "customer-list":
             query = """
-            select dc.first_name, dc.last_name, dc.father_name, dc.birth_date, dc.pin, dc.visits_count  as visits, dc.id as customer_id,dc.created_at
-            from stat.dim_visit dv 
-            left join stat.dim_customer dc on dc.id::varchar = dv.custom_1 
-            left join stat.fact_visit_transaction  fvt on fvt.visit_key = dv.id 
-            left join stat.dim_branch db on db.id = fvt.branch_key
-            where dv.custom_1 is not null and dc.id is not null
+            SELECT 
+                dc.first_name, 
+                dc.last_name,
+                dc.father_name, 
+                dc.birth_date,
+                dc.pin,
+                dc.visits_count,
+                dc.id AS customer_id,
+                dc.created_at,
+                to_timestamp(MAX(dv.created_timestamp) / 1000.0) AS last_visited_at
+            FROM stat.dim_visit dv
+            LEFT JOIN stat.dim_customer dc 
+                ON dc.id::varchar = dv.custom_1
+            LEFT JOIN stat.fact_visit_transaction fvt 
+                ON fvt.visit_key = dv.id
+            LEFT JOIN stat.dim_branch db 
+                ON db.id = fvt.branch_key
+            WHERE dv.custom_1 IS NOT NULL
+              AND dc.id IS NOT NULL
                 """
 
             pin = request.GET.get('pin')

@@ -241,11 +241,11 @@ class CustomerAllExportSerializer(serializers.Serializer):
     last_name = serializers.CharField(max_length=100)
     father_name = serializers.CharField(max_length=255)
     birth_date = serializers.SerializerMethodField()
-    fin = serializers.CharField(max_length=10, source='pin')
-    visit_count = serializers.IntegerField(source='visits')
+    pin = serializers.CharField(max_length=10)
+    visits_count = serializers.IntegerField()
     created_at = serializers.DateTimeField()
     # ADDED: last_visited field for export
-    last_visited = serializers.DateTimeField(source='last_visited_at', allow_null=True, required=False)
+    last_visited_at = serializers.DateTimeField(allow_null=True, required=False)
 
     COLUMN_MAPPING = {
         'first_name': 'Ad',
@@ -254,9 +254,9 @@ class CustomerAllExportSerializer(serializers.Serializer):
         'birth_date': 'Doğum tarixi',
         'fin': 'FİN',
         'pin': 'FİN',  # alias
-        'visit_count': 'Visit sayı',
+        'visits_count': 'Visit sayı',
         'visits': 'Visit sayı',  # alias
-        'last_visited': 'Son ziyarət',
+        'last_visited_at': 'Son ziyarət',
         'created_at': 'Yaradılma tarixi'
     }
 
