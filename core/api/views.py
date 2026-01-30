@@ -1068,8 +1068,6 @@ class Export(APIView):
         max_date_selected = request.query_params.get('maxDateSelected')
         selected_customer = request.query_params.get('customer_id')
         selected_services = request.query_params.getlist('selectedServices')
-        status = request.query_params.getlist('status')
-        selected_visit = request.query_params.get('visit')
         selected_first_name = request.GET.get('first_name')
         selected_last_name = request.GET.get('last_name')
         selected_father_name = request.GET.get('father_name')
@@ -1496,55 +1494,9 @@ class Export(APIView):
                 item["result"] = temp[0]["status_description"]
                 item["status"] = transactionNamings[temp[0]["next_action"]]
 
-            result = VisitExportSerializer(data, many=True).data
-
-
-        elif data_url == "visit-transaction":
-            if not selected_visit:
-                return Response({'visit_id': 'visit id required'})
-            query = f"""
-        
-                select 
-                fvt.time_key + fvt.time_seconds + fvt.waiting_time  as call_time,  
-                fvt.waiting_time,
-                fvt.time_key + fvt.time_seconds + fvt.waiting_time + fvt.transaction_time as finish_time,
-                fvt.transaction_time,
-                dvo."name" as visit_outcome, ds.first_name as user_first_name, ds.last_name as user_last_name, ds."name" as user_login
-                from stat.fact_visit_transaction fvt 
-                left join stat.dim_visit_outcome dvo on dvo.id = fvt.visit_outcome_key 
-                left join stat.dim_staff ds on ds.id = fvt.staff_key
-                left join stat.dim_visit dv on dv.id = fvt.visit_key
-                left join stat.dim_customer dc on dc.id::varchar = dv.custom_1 
-                where fvt.visit_key = {selected_visit}
-                order by fvt.time_key, fvt.time_seconds 
-                ;
-            
-            """
-
-            cursor.execute(query)
-            data = cursor.fetchall()
-
-            # Function to convert seconds to H:M:S format
-            def format_time(total_seconds):
-                hours = total_seconds // 3600
-                minutes = (total_seconds % 3600) // 60
-                seconds = total_seconds % 60
-                return "{:02d}:{:02d}:{:02d}".format(hours, minutes, seconds)
-
-            # Format the time columns in the result
-            result = []
-            for row in data:
-                formatted_row = {
-                    "Call Time": format_time(row[0]),
-                    "Waiting Time": format_time(row[1]),
-                    "Finish Time": format_time(row[2]),
-                    "Transaction Time": format_time(row[3]),
-                    "Outcome": row[4],
-                    "User First n.": row[5],
-                    "User Last n.": row[6],
-                    "User Login": row[7]
-                }
-                result.append(formatted_row)
+            # Parse selected_columns for export
+            cols = selected_columns.split(",") if selected_columns else None
+            result = VisitExportSerializer(data, many=True, selected_columns=cols).data
 
         url = self.export_data(result, 'excel', request.get_host())
         return Response({"url": url})

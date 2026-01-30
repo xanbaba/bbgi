@@ -374,6 +374,31 @@ class VisitExportSerializer(serializers.Serializer):
     represented_party_name = serializers.CharField(max_length=255, allow_null=True, required=False)
     represented_party_voen = serializers.CharField(max_length=50, allow_null=True, required=False)
 
+    COLUMN_MAPPING = {
+        'first_name': 'Ad',
+        'last_name': 'Soyad',
+        'pin': 'FIN',
+        'ticket_id': 'Bilet',
+        'service_name': 'Xidmət',
+        'transactions_count': 'Transaction sayı',
+        'created_date': 'Yaranma tarixi',
+        'total_wait_time': 'Gözləmə vaxtı',
+        'total_transaction_time': 'Transaction vaxtı',
+        'total_visit_time': 'Ziyarət müddəti',
+        'declaration': 'Bəyannamə',
+        'representation': 'Təmsilçilik',
+        'representative_name': 'Təmsilçi adı',
+        'representative_voen': 'Təmsilçi VÖEN',
+        'represented_party_name': 'Təmsil olunan',
+        'represented_party_voen': 'Təmsil olunan VÖEN',
+        'status': 'Status',
+        'result': 'Nəticə',
+    }
+
+    def __init__(self, *args, selected_columns=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.selected_columns = [col for col in selected_columns if col] if selected_columns else None
+
     def get_total_wait_time(self, obj):
         return format_time(obj.get('total_wait_time'))
 
@@ -406,26 +431,17 @@ class VisitExportSerializer(serializers.Serializer):
 
     def to_representation(self, instance):
         original_data = super().to_representation(instance)
-        azerbaijani_data = {
-            "Ad": original_data.get("first_name", "-"),
-            "Soyad": original_data.get("last_name", "-"),
-            "FIN": original_data.get("pin", "-"),
-            "Bilet": original_data.get("ticket_id", "-"),
-            "Xidmət": original_data.get("service_name", "-"),
-            "Transaction sayı": original_data.get("transactions_count", 0),
-            "Yaranma tarixi": original_data.get("created_date", "-"),
-            "Gözləmə vaxtı": original_data.get("total_wait_time", "-"),
-            "Transaction vaxtı": original_data.get("total_transaction_time", "-"),
-            "Ziyarət müddəti": original_data.get("total_visit_time", "-"),
-            "Bəyannamə": original_data.get("declaration", "-"),
-            "Təmsilçilik": original_data.get("representation", "-"),
-            "Təmsilçi adı": original_data.get("representative_name", "-"),
-            "Təmsilçi VÖEN": original_data.get("representative_voen", "-"),
-            "Təmsil olunan": original_data.get("represented_party_name", "-"),
-            "Təmsil olunan VÖEN": original_data.get("represented_party_voen", "-"),
-            "Status": original_data.get("status", "-"),
-            "Nəticə": original_data.get("result", "-"),
-        }
+
+        # Build output with Azerbaijani column names, filtering by selected_columns if provided
+        azerbaijani_data = {}
+        for col, az_name in self.COLUMN_MAPPING.items():
+            # Skip columns that aren't in original_data
+            if col not in original_data:
+                continue
+            # Include column if no selection or if column is in selection
+            if not self.selected_columns or col in self.selected_columns:
+                azerbaijani_data[az_name] = original_data.get(col, '-') or '-'
+
         return azerbaijani_data
     
 class StatisticExportSerializer(serializers.Serializer):
