@@ -1,7 +1,7 @@
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from core.api.helper import convert_data, parse_time, transactionNamings
-from core.api.serializers import StatisticsApiSerializer, CustomerAllExportSerializer, CustomerAllSerializer, \
+from core.api.serializers import StatisticsApiSerializer, StatisticsExportSerializer, CustomerAllExportSerializer, CustomerAllSerializer, \
     CustomerSerializer, \
     StatisticExportSerializer, StatisticSerializer, TransactionDataSerializer, VisitExportSerializer, VisitSerializer
 from ..mrz_input import get_id_data
@@ -1077,100 +1077,173 @@ class Export(APIView):
 
         cursor = get_connection()
         if data_url == "report":
-            call_min_date_selected = request.GET.get('callMinDateSelected', None)
-            call_max_date_selected = request.GET.get('callMaxDateSelected', None)
-            finish_min_date_selected = request.GET.get('finishMinDateSelected', None)
-            finish_max_date_selected = request.GET.get('finishMaxDateSelected', None)
-            wait_min_date_selected = request.GET.get('waitMinDateSelected', None)
-            wait_max_date_selected = request.GET.get('waitMaxDateSelected', None)
-            transac_min_date_selected = request.GET.get('transacMinDateSelected', None)
-            transac_max_date_selected = request.GET.get('transacMaxDateSelected', None)
-            selected_birth_date = request.query_params.getlist('birth_date')
-            pin = request.GET.get('pin')
-            ticket_id = request.GET.get('ticket_id')
-            staff_name = request.GET.get('staff_name')
+            # Get filter parameters matching StatisticsApi
+            params = {}
+            where = []
 
-            query = """
-                select fvt.date_key, fvt.create_timestamp, db."name" as branch_name, db.id as branch_id,
-                ds.id as service_id, dv.ticket_id, ds."name" as service_name,
-                fvt.waiting_time, fvt.call_timestamp ,fvt.transaction_time,
-                fvt.time_key+fvt.time_seconds as created_time, 
-                dc.first_name, dc.last_name, dc.pin , dc.father_name , dc.birth_date,
-                fvt.outcome_key,dsf.first_name as staff_first_name,dsf.last_name as staff_last_name, dsf.name as staff_name
-                from stat.fact_visit_transaction fvt 
-                left join stat.dim_visit dv on dv.id = fvt.visit_key 
-                left join stat.dim_branch db on db.id = fvt.branch_key 
-                left join stat.dim_service ds on ds.id = fvt.service_key 
-                left join stat.dim_customer dc on dc.id::varchar = dv.custom_1
-                left join stat.dim_staff dsf on dsf.id = fvt.staff_key 
-                where 1=1
-                """
-
+            # 1. Visit Date Range
             if min_date_selected and max_date_selected:
-                query += f"AND fvt.create_timestamp >= '{min_date_selected} 00:00:00' AND fvt.create_timestamp <= '{max_date_selected} 23:59:59'"
+                where.append("TO_TIMESTAMP(dv.created_timestamp / 1000)::date BETWEEN %(min_date)s AND %(max_date)s")
+                params['min_date'] = min_date_selected
+                params['max_date'] = max_date_selected
 
-            if call_min_date_selected and call_max_date_selected:
-                query += f"AND fvt.call_timestamp BETWEEN '{call_min_date_selected}' AND '{call_max_date_selected}'"
-
-            if finish_min_date_selected and finish_max_date_selected:
-                query += f"AND fvt.call_timestamp + (fvt.transaction_time * INTERVAL '1 second') BETWEEN '{finish_min_date_selected} 00:00:00' AND '{finish_max_date_selected} 23:59:59'"
-
-            if wait_min_date_selected and wait_max_date_selected:
-                wait_min_date_selected = parse_time(wait_min_date_selected)
-                wait_max_date_selected = parse_time(wait_max_date_selected)
-
-                query += f"AND fvt.waiting_time BETWEEN '{wait_min_date_selected}' AND '{wait_max_date_selected}'"
-
-            if transac_min_date_selected and transac_max_date_selected:
-                transac_min_date_selected = parse_time(transac_min_date_selected)
-                transac_max_date_selected = parse_time(transac_max_date_selected)
-
-                query += f"AND fvt.transaction_time BETWEEN '{transac_min_date_selected}' AND '{transac_max_date_selected}'"
-
-            if selected_branches and not selected_branches == ['']:
-                query += f"AND db.id in ({','.join(selected_branches)}) "
-
-            if selected_services and not selected_services == ['']:
-                query += f"AND ds.origin_id IN ({','.join(selected_services)}) "
-
-            if selected_first_name:
-                query += f"AND dc.first_name ilike '%{selected_first_name}%'"
-
+            # 2. Ticket ID
+            ticket_id = request.GET.get('ticket_id')
             if ticket_id:
-                query += f"AND dv.ticket_id ilike '%{ticket_id}%'"
+                where.append("dv.ticket_id ILIKE %(ticket_id)s")
+                params['ticket_id'] = f"%{ticket_id}%"
 
-            if selected_father_name:
-                query += f"AND dc.father_name ilike '%{selected_father_name}%'"
+            # 3. Service Name
+            service_name = request.GET.get('service_name')
+            if service_name:
+                where.append("ds_first.name ILIKE %(service_name)s")
+                params['service_name'] = f"%{service_name}%"
 
-            if selected_last_name:
-                query += f"AND dc.last_name ilike '%{selected_last_name}%'"
+            # 4. Declaration (Customs Number)
+            declaration = request.GET.get('declaration')
+            if declaration:
+                where.append("vd_latest.customs_number ILIKE %(declaration)s")
+                params['declaration'] = f"%{declaration}%"
 
-            if selected_birth_date:
-                lst = self.multi_filter(selected_birth_date)
-                query += f"AND dc.birth_date IN ({','.join(lst)}) "
+            # 5. Representation (Type)
+            representation = request.GET.get('representation')
+            if representation:
+                where.append("vd_latest.type ILIKE %(representation)s")
+                params['representation'] = f"%{representation}%"
 
-            if pin:
-                query += f"AND dc.pin ilike '%{pin}%'"
+            # 6. Representative Name
+            representative_name = request.GET.get('representative_name')
+            if representative_name:
+                where.append("vd_latest.representative_name ILIKE %(rep_name)s")
+                params['rep_name'] = f"%{representative_name}%"
 
-            if staff_name:
-                query += f"AND dsf.name ilike '%{staff_name}%'"
-                count_query += f"AND dsf.name ilike '%{staff_name}%'"
+            # 7. Representative VOEN
+            representative_voen = request.GET.get('representative_voen')
+            if representative_voen:
+                where.append("vd_latest.representative_voen ILIKE %(rep_voen)s")
+                params['rep_voen'] = f"%{representative_voen}%"
 
-            if entered_text:
-                query += f"""
-                    AND (
-                        dc.first_name ilike '%{entered_text}%' OR 
-                        dc.father_name ilike '%{entered_text}%' OR 
-                        dc.last_name ilike '%{entered_text}%' OR
-                        dc.pin ilike '%{entered_text}%'
-                    )
-                """
+            # 8. Represented Party Name (Company Name)
+            represented_party_name = request.GET.get('represented_party_name')
+            if represented_party_name:
+                where.append("vd_latest.company_name ILIKE %(party_name)s")
+                params['party_name'] = f"%{represented_party_name}%"
 
-            query += f"order by fvt.create_timestamp DESC;"
-            cursor.execute(query)
+            # 9. Represented Party VOEN (Company VOEN)
+            represented_party_voen = request.GET.get('represented_party_voen')
+            if represented_party_voen:
+                where.append("vd_latest.company_voen ILIKE %(party_voen)s")
+                params['party_voen'] = f"%{represented_party_voen}%"
+
+            # Construct WHERE clause
+            base_condition = "dv.custom_1 IS NOT NULL"
+            where_sql = " AND ".join(where)
+            if where_sql:
+                final_where = f"{base_condition} AND {where_sql}"
+            else:
+                final_where = base_condition
+
+            # Optimized Main Query using CTEs and JOINs instead of correlated subqueries
+            query = f"""
+                WITH 
+                -- Get latest declaration per visit
+                latest_declarations AS (
+                    SELECT DISTINCT ON (visit_id)
+                        visit_id,
+                        customs_number,
+                        type,
+                        representative_name,
+                        representative_voen,
+                        company_name,
+                        company_voen
+                    FROM visits_declaration
+                    ORDER BY visit_id, created_at DESC
+                ),
+                -- Get first service per visit
+                first_service AS (
+                    SELECT DISTINCT ON (fvt.visit_key)
+                        fvt.visit_key,
+                        ds.name AS service_name
+                    FROM fact_visit_transaction fvt
+                    INNER JOIN dim_service ds ON ds.id = fvt.service_key
+                    ORDER BY fvt.visit_key, fvt.create_timestamp ASC
+                ),
+                -- Get first finish note result per visit (using origin_id)
+                finish_notes AS (
+                    SELECT DISTINCT ON (visit_id)
+                        visit_id,
+                        status
+                    FROM stat.visits_note
+                    WHERE action = 'finish'
+                    ORDER BY visit_id, created_at ASC
+                ),
+                -- Compute next_action for status (matching StatisticsApi logic)
+                event_with_next AS (
+                    SELECT 
+                        fve.visit_key,
+                        dvet.name AS event_name,
+                        fve.event_timestamp,
+                        LEAD(dvet.name) OVER (PARTITION BY fve.visit_key ORDER BY fve.event_timestamp) AS next_action
+                    FROM fact_visit_events fve
+                    INNER JOIN dim_visit_event_type dvet ON dvet.id = fve.visit_event_type_key
+                    WHERE dvet.name NOT IN ('VISIT_NEXT', 'VISIT_END_TRANSACTION')
+                ),
+                -- Get the last VISIT_CREATE or VISIT_CALL event's next_action per visit
+                visit_status AS (
+                    SELECT DISTINCT ON (visit_key)
+                        visit_key,
+                        next_action
+                    FROM event_with_next
+                    WHERE event_name IN ('VISIT_CREATE', 'VISIT_CALL')
+                    ORDER BY visit_key, event_timestamp DESC
+                ),
+                -- Aggregate transaction times
+                visit_times AS (
+                    SELECT 
+                        visit_key,
+                        SUM(transaction_time) AS total_transaction_time,
+                        SUM(waiting_time) AS total_wait_time
+                    FROM fact_visit_transaction
+                    GROUP BY visit_key
+                )
+                SELECT 
+                    dv.id AS visit_key,
+                    dv.ticket_id,
+                    TO_CHAR(TO_TIMESTAMP(dv.created_timestamp / 1000), 'DD-MM-YYYY HH24:MI') AS visit_date,
+                    fs.service_name,
+                    vt.total_transaction_time,
+                    vt.total_wait_time,
+                    vd_latest.customs_number,
+                    vd_latest.type,
+                    vd_latest.representative_name,
+                    vd_latest.representative_voen,
+                    vd_latest.company_name,
+                    vd_latest.company_voen,
+                    CASE fn.status
+                        WHEN 0 THEN 'Müraciət təmin edilmədi'
+                        WHEN 1 THEN 'Müraciət təmin edildi'
+                        WHEN 2 THEN 'Müraciət qismən təmin edildi'
+                        WHEN 3 THEN 'Xitam verildi'
+                        ELSE '-'
+                    END AS result,
+                    COALESCE(vs.next_action, '-') AS status
+                FROM dim_visit dv
+                LEFT JOIN visit_times vt ON vt.visit_key = dv.id
+                LEFT JOIN first_service fs ON fs.visit_key = dv.id
+                LEFT JOIN latest_declarations vd_latest ON vd_latest.visit_id = dv.origin_id::varchar
+                LEFT JOIN finish_notes fn ON fn.visit_id = dv.origin_id::varchar
+                LEFT JOIN visit_status vs ON vs.visit_key = dv.id
+                WHERE {final_where}
+                ORDER BY dv.created_timestamp DESC
+            """
+
+            cursor.execute(query, params)
             data = convert_data(cursor)
             cursor.close()
-            result = StatisticExportSerializer(data, many=True).data
+
+            # Parse selected_columns for export
+            cols = selected_columns.split(",") if selected_columns else None
+            result = StatisticsExportSerializer(data, many=True, selected_columns=cols).data
 
 
         elif data_url == "customer-list":
@@ -1811,7 +1884,6 @@ class StatisticsApi(APIView):
 
         # 1. Visit Date Range
         if request.GET.get('minDateSelected') and request.GET.get('maxDateSelected'):
-            # Assuming input is 'YYYY-MM-DD'. Comparing date part of the visit timestamp.
             where.append("TO_TIMESTAMP(dv.created_timestamp / 1000)::date BETWEEN %(min_date)s AND %(max_date)s")
             params['min_date'] = request.GET['minDateSelected']
             params['max_date'] = request.GET['maxDateSelected']
@@ -1821,87 +1893,42 @@ class StatisticsApi(APIView):
             where.append("dv.ticket_id ILIKE %(ticket_id)s")
             params['ticket_id'] = f"%{request.GET['ticket_id']}%"
 
-        # 3. Service Name
-        # We use EXISTS to check if the visit has a service matching the name
+        # 3. Service Name - filter on joined CTE
         if request.GET.get('service_name'):
-            where.append("""
-                EXISTS (
-                    SELECT 1 
-                    FROM fact_visit_transaction fvt_s
-                    INNER JOIN dim_service AS ds_s ON ds_s.id = fvt_s.service_key
-                    WHERE fvt_s.visit_key = dv.id AND ds_s.name ILIKE %(service_name)s
-                )
-            """)
+            where.append("fs.service_name ILIKE %(service_name)s")
             params['service_name'] = f"%{request.GET['service_name']}%"
 
         # 4. Declaration (Customs Number)
         if request.GET.get('declaration'):
-            where.append("""
-                EXISTS (
-                    SELECT 1 FROM visits_declaration vd_filter 
-                    WHERE vd_filter.visit_id = dv.origin_id::varchar 
-                    AND vd_filter.customs_number ILIKE %(declaration)s
-                )
-            """)
+            where.append("vd_latest.customs_number ILIKE %(declaration)s")
             params['declaration'] = f"%{request.GET['declaration']}%"
 
         # 5. Representation (Type)
         if request.GET.get('representation'):
-            where.append("""
-                EXISTS (
-                    SELECT 1 FROM visits_declaration vd_filter 
-                    WHERE vd_filter.visit_id = dv.origin_id::varchar 
-                    AND vd_filter.type ILIKE %(representation)s
-                )
-            """)
+            where.append("vd_latest.type ILIKE %(representation)s")
             params['representation'] = f"%{request.GET['representation']}%"
 
         # 6. Representative Name
         if request.GET.get('representative_name'):
-            where.append("""
-                EXISTS (
-                    SELECT 1 FROM visits_declaration vd_filter 
-                    WHERE vd_filter.visit_id = dv.origin_id::varchar 
-                    AND vd_filter.representative_name ILIKE %(rep_name)s
-                )
-            """)
+            where.append("vd_latest.representative_name ILIKE %(rep_name)s")
             params['rep_name'] = f"%{request.GET['representative_name']}%"
 
         # 7. Representative VOEN
         if request.GET.get('representative_voen'):
-            where.append("""
-                EXISTS (
-                    SELECT 1 FROM visits_declaration vd_filter 
-                    WHERE vd_filter.visit_id = dv.origin_id::varchar 
-                    AND vd_filter.representative_voen ILIKE %(rep_voen)s
-                )
-            """)
+            where.append("vd_latest.representative_voen ILIKE %(rep_voen)s")
             params['rep_voen'] = f"%{request.GET['representative_voen']}%"
 
         # 8. Represented Party Name (Company Name)
         if request.GET.get('represented_party_name'):
-            where.append("""
-                EXISTS (
-                    SELECT 1 FROM visits_declaration vd_filter 
-                    WHERE vd_filter.visit_id = dv.origin_id::varchar 
-                    AND vd_filter.company_name ILIKE %(party_name)s
-                )
-            """)
+            where.append("vd_latest.company_name ILIKE %(party_name)s")
             params['party_name'] = f"%{request.GET['represented_party_name']}%"
 
         # 9. Represented Party VOEN (Company VOEN)
         if request.GET.get('represented_party_voen'):
-            where.append("""
-                EXISTS (
-                    SELECT 1 FROM visits_declaration vd_filter 
-                    WHERE vd_filter.visit_id = dv.origin_id::varchar 
-                    AND vd_filter.company_voen ILIKE %(party_voen)s
-                )
-            """)
+            where.append("vd_latest.company_voen ILIKE %(party_voen)s")
             params['party_voen'] = f"%{request.GET['represented_party_voen']}%"
 
         # Construct WHERE clause
-        # Default condition to ensure we only look at valid customer-linked visits
         base_condition = "dv.custom_1 IS NOT NULL"
         where_sql = " AND ".join(where)
         if where_sql:
@@ -1909,70 +1936,97 @@ class StatisticsApi(APIView):
         else:
             final_where = base_condition
 
-        # ---- Main Query ----
+        # ---- Optimized Main Query using CTEs ----
         query = f"""
+            WITH 
+            -- Get latest declaration per visit
+            latest_declarations AS (
+                SELECT DISTINCT ON (visit_id)
+                    visit_id,
+                    customs_number,
+                    type,
+                    representative_name,
+                    representative_voen,
+                    company_name,
+                    company_voen
+                FROM visits_declaration
+                ORDER BY visit_id, created_at DESC
+            ),
+            -- Get first service per visit
+            first_service AS (
+                SELECT DISTINCT ON (fvt.visit_key)
+                    fvt.visit_key,
+                    ds.name AS service_name
+                FROM fact_visit_transaction fvt
+                INNER JOIN dim_service ds ON ds.id = fvt.service_key
+                ORDER BY fvt.visit_key, fvt.create_timestamp ASC
+            ),
+            -- Get first finish note result per visit (using origin_id)
+            finish_notes AS (
+                SELECT DISTINCT ON (visit_id)
+                    visit_id,
+                    status
+                FROM stat.visits_note
+                WHERE action = 'finish'
+                ORDER BY visit_id, created_at ASC
+            ),
+            -- Compute next_action for status
+            event_with_next AS (
+                SELECT 
+                    fve.visit_key,
+                    dvet.name AS event_name,
+                    fve.event_timestamp,
+                    LEAD(dvet.name) OVER (PARTITION BY fve.visit_key ORDER BY fve.event_timestamp) AS next_action
+                FROM fact_visit_events fve
+                INNER JOIN dim_visit_event_type dvet ON dvet.id = fve.visit_event_type_key
+                WHERE dvet.name NOT IN ('VISIT_NEXT', 'VISIT_END_TRANSACTION')
+            ),
+            -- Get the last VISIT_CREATE or VISIT_CALL event's next_action per visit
+            visit_status AS (
+                SELECT DISTINCT ON (visit_key)
+                    visit_key,
+                    next_action
+                FROM event_with_next
+                WHERE event_name IN ('VISIT_CREATE', 'VISIT_CALL')
+                ORDER BY visit_key, event_timestamp DESC
+            ),
+            -- Aggregate transaction times
+            visit_times AS (
+                SELECT 
+                    visit_key,
+                    SUM(transaction_time) AS total_transaction_time,
+                    SUM(waiting_time) AS total_wait_time
+                FROM fact_visit_transaction
+                GROUP BY visit_key
+            )
             SELECT 
                 dv.id AS visit_key,
                 dv.ticket_id,
                 TO_CHAR(TO_TIMESTAMP(dv.created_timestamp / 1000), 'DD-MM-YYYY HH24:MI') AS visit_date,
-
-                (SELECT s_ds.name 
-                 FROM fact_visit_transaction s_fvt
-                 INNER JOIN dim_service AS s_ds ON s_ds.id = s_fvt.service_key
-                 WHERE s_fvt.visit_key = dv.id
-                 ORDER BY s_fvt.create_timestamp LIMIT 1) AS service_name,
-
-                SUM(fvt.transaction_time) AS total_transaction_time, 
-                SUM(fvt.waiting_time) AS total_wait_time,
-
-                (SELECT vdecl.customs_number 
-                 FROM visits_declaration vdecl
-                 WHERE vdecl.visit_id = dv.origin_id::varchar
-                 ORDER BY vdecl.created_at DESC LIMIT 1) AS customs_number,
-
-                (SELECT vdecl.type 
-                 FROM visits_declaration vdecl
-                 WHERE vdecl.visit_id = dv.origin_id::varchar
-                 ORDER BY vdecl.created_at DESC LIMIT 1) AS type,
-
-                (SELECT vdecl.representative_name 
-                 FROM visits_declaration vdecl
-                 WHERE vdecl.visit_id = dv.origin_id::varchar
-                 ORDER BY vdecl.created_at DESC LIMIT 1) AS representative_name,
-
-                (SELECT vdecl.representative_voen 
-                 FROM visits_declaration vdecl
-                 WHERE vdecl.visit_id = dv.origin_id::varchar
-                 ORDER BY vdecl.created_at DESC LIMIT 1) AS representative_voen,
-
-                (SELECT vdecl.company_name 
-                 FROM visits_declaration vdecl
-                 WHERE vdecl.visit_id = dv.origin_id::varchar
-                 ORDER BY vdecl.created_at DESC LIMIT 1) AS company_name,
-
-                (SELECT vdecl.company_voen 
-                 FROM visits_declaration vdecl
-                 WHERE vdecl.visit_id = dv.origin_id::varchar
-                 ORDER BY vdecl.created_at DESC LIMIT 1) AS company_voen,
-
-                (SELECT vn.status 
-                 FROM visits_note vn
-                 WHERE vn.visit_id = dv.id::varchar 
-                   AND vn.action = 'finish'
-                 ORDER BY vn.created_at ASC LIMIT 1) AS result,
-
-                (SELECT dvet.name 
-                 FROM fact_visit_events s_fve
-                 INNER JOIN dim_visit_event_type dvet ON dvet.id = s_fve.visit_event_type_key
-                 WHERE s_fve.visit_key = dv.id
-                 ORDER BY s_fve.event_timestamp DESC LIMIT 1) AS status
-
+                fs.service_name,
+                vt.total_transaction_time,
+                vt.total_wait_time,
+                vd_latest.customs_number,
+                vd_latest.type,
+                vd_latest.representative_name,
+                vd_latest.representative_voen,
+                vd_latest.company_name,
+                vd_latest.company_voen,
+                CASE fn.status
+                    WHEN 0 THEN 'Müraciət təmin edilmədi'
+                    WHEN 1 THEN 'Müraciət təmin edildi'
+                    WHEN 2 THEN 'Müraciət qismən təmin edildi'
+                    WHEN 3 THEN 'Xitam verildi'
+                    ELSE '-'
+                END AS result,
+                COALESCE(vs.next_action, '-') AS status
             FROM dim_visit dv
-            LEFT JOIN fact_visit_transaction fvt ON dv.id = fvt.visit_key
-            LEFT JOIN stat.dim_customer dc ON dc.id::varchar = dv.custom_1
-            LEFT JOIN stat.dim_branch db ON db.id = fvt.branch_key
+            LEFT JOIN visit_times vt ON vt.visit_key = dv.id
+            LEFT JOIN first_service fs ON fs.visit_key = dv.id
+            LEFT JOIN latest_declarations vd_latest ON vd_latest.visit_id = dv.origin_id::varchar
+            LEFT JOIN finish_notes fn ON fn.visit_id = dv.origin_id::varchar
+            LEFT JOIN visit_status vs ON vs.visit_key = dv.id
             WHERE {final_where}
-            GROUP BY dv.id, dv.ticket_id, dv.created_timestamp
             ORDER BY dv.created_timestamp DESC
             LIMIT %(pg_size)s OFFSET %(offset)s
         """
@@ -1981,13 +2035,25 @@ class StatisticsApi(APIView):
         count_query = f"""
             SELECT COUNT(*)
             FROM (
+                WITH 
+                latest_declarations AS (
+                    SELECT DISTINCT ON (visit_id) visit_id
+                    FROM visits_declaration
+                    ORDER BY visit_id, created_at DESC
+                ),
+                first_service AS (
+                    SELECT DISTINCT ON (fvt.visit_key)
+                        fvt.visit_key,
+                        ds.name AS service_name
+                    FROM fact_visit_transaction fvt
+                    INNER JOIN dim_service ds ON ds.id = fvt.service_key
+                    ORDER BY fvt.visit_key, fvt.create_timestamp ASC
+                )
                 SELECT dv.id
                 FROM dim_visit dv
-                LEFT JOIN fact_visit_transaction fvt ON dv.id = fvt.visit_key
-                LEFT JOIN stat.dim_customer dc ON dc.id::varchar = dv.custom_1
-                LEFT JOIN stat.dim_branch db ON db.id = fvt.branch_key
+                LEFT JOIN first_service fs ON fs.visit_key = dv.id
+                LEFT JOIN latest_declarations vd_latest ON vd_latest.visit_id = dv.origin_id::varchar
                 WHERE {final_where}
-                GROUP BY dv.id
             ) AS sub
         """
 
@@ -2003,91 +2069,11 @@ class StatisticsApi(APIView):
 
         cursor.execute(count_query, params)
         total = cursor.fetchone()[0]
-        # cursor.close()
+        cursor.close()
 
-        # ---- Serialization ----
+        # ---- Serialization (same output structure) ----
         result = StatisticsApiSerializer(data, many=True).data
 
-        for item in result:
-            transaction_query = f"""
-                                WITH event_flow AS (
-                                    SELECT
-                                        dim_visit_event_type.name,
-                                        dim_visit.ticket_id,
-                                        dim_visit.origin_id,
-                                        dim_staff.first_name,
-                                        dim_staff.last_name,
-                                        -- Added visit_transaction_id to the CTE
-                                        fact_visit_events.visit_transaction_id,
-                                        fact_visit_events.event_timestamp,
-                                        -- Time the current action ends
-                                        LEAD(fact_visit_events.event_timestamp) OVER (ORDER BY fact_visit_events.event_timestamp) AS next_action_timestamp,
-                                        -- What the next action is
-                                        LEAD(dim_visit_event_type.name) OVER (ORDER BY fact_visit_events.event_timestamp) AS next_action,
-                                        -- The timestamp of the previous event to calculate waiting time for CALLS
-                                        LAG(fact_visit_events.event_timestamp) OVER (ORDER BY fact_visit_events.event_timestamp) AS prev_event_timestamp
-                                    FROM fact_visit_events
-                                             LEFT JOIN dim_visit_event_type ON dim_visit_event_type.id = fact_visit_events.visit_event_type_key
-                                             LEFT JOIN dim_visit ON dim_visit.id = fact_visit_events.visit_key
-                                             LEFT JOIN dim_staff ON dim_staff.id = fact_visit_events.staff_key
-                                    WHERE fact_visit_events.visit_key = {item["id"]}
-                                      AND dim_visit_event_type.name NOT IN ('VISIT_NEXT', 'VISIT_END_TRANSACTION')
-                                )
-                                SELECT
-                                    f.name,
-                                    f.ticket_id,
-                                    -- Showing the Transaction ID in the results
-                                    f.visit_transaction_id,
-                                    f.first_name,
-                                    f.last_name,
-                                    f.event_timestamp,
-                                    f.next_action_timestamp,
-                                    -- WAITING TIME: From Create/Transfer/Park until this Call starts
-                                    CASE
-                                        WHEN f.name = 'VISIT_CALL' THEN EXTRACT(EPOCH FROM (f.event_timestamp - f.prev_event_timestamp))::INT
-                                        ELSE NULL
-                                        END AS waiting_time_sec,
-                                    -- SERVING TIME: From Call until the next action (Park/Transfer/End)
-                                    CASE
-                                        WHEN f.name = 'VISIT_CALL' THEN EXTRACT(EPOCH FROM (f.next_action_timestamp - f.event_timestamp))::INT
-                                        ELSE NULL
-                                        END AS serving_time_sec,
-                                    f.next_action,
-                                    COALESCE(notes.source_table, 'RECEPTION') AS note_table,
-                                    notes.status_description,
-                                    notes.content AS staff_note
-                                FROM event_flow f
-                                         LEFT JOIN (
-                                    SELECT DISTINCT
-                                        visit_id,
-                                        "table" AS source_table,
-                                        content,
-                                        CASE
-                                            WHEN status = 0 THEN 'Müraciət təmin edilmədi'
-                                            WHEN status = 1 THEN 'Müraciət təmin edildi'
-                                            WHEN status = 2 THEN 'Müraciət qismən təmin edildi'
-                                            WHEN status = 3 THEN 'Xitam verildi'
-                                            ELSE ' '
-                                            END AS status_description,
-                                        CASE
-                                            WHEN action = 'reception' THEN 'VISIT_CREATE'
-                                            WHEN action = 'park'      THEN 'VISIT_TRANSFER_TO_USER_POOL'
-                                            WHEN action = 'transfer'  THEN 'VISIT_TRANSFER_TO_QUEUE'
-                                            WHEN action = 'finish'    THEN 'VISIT_END'
-                                            ELSE action
-                                            END AS matched_name
-                                    FROM stat.visits_note
-                                ) notes ON notes.visit_id = CAST(f.origin_id AS VARCHAR)
-                                    AND (notes.matched_name = f.name OR notes.matched_name = f.next_action)
-                                WHERE f.name IN ('VISIT_CREATE', 'VISIT_CALL')
-                                ORDER BY f.event_timestamp DESC
-                                LIMIT 1;
-                            """
-            cursor.execute(transaction_query)
-            temp = convert_data(cursor)
-            print(temp)
-            item["result"] = temp[0]["status_description"]
-            item["status"] = temp[0]["next_action"]
 
         return Response({
             "data": result,

@@ -141,6 +141,72 @@ class StatisticsApiSerializer(serializers.Serializer):
         return format_time(total_seconds)
 
 
+class StatisticsExportSerializer(serializers.Serializer):
+    """Export serializer for Statistics/Report with selected columns support"""
+    visit_key = serializers.IntegerField()
+    visit_date = serializers.CharField()
+    ticket_id = serializers.CharField()
+    service_name = serializers.CharField(allow_null=True, required=False)
+    visit_duration = serializers.SerializerMethodField()
+
+    # Declaration fields
+    customs_number = serializers.CharField(allow_null=True, required=False)
+    type = serializers.CharField(allow_null=True, required=False)
+    representative_name = serializers.CharField(allow_null=True, required=False)
+    representative_voen = serializers.CharField(allow_null=True, required=False)
+    company_name = serializers.CharField(allow_null=True, required=False)
+    company_voen = serializers.CharField(allow_null=True, required=False)
+
+    status = serializers.CharField(allow_null=True, required=False)
+    result = serializers.CharField(allow_null=True, required=False)
+
+    COLUMN_MAPPING = {
+        'visit_key': 'ID',
+        'visit_date': 'Tarix',
+        'ticket_id': 'Bilet',
+        'service_name': 'Xidmət',
+        'visit_duration': 'Ziyarət müddəti',
+        'customs_number': 'Bəyannamə',
+        'declaration': 'Bəyannamə',  # alias
+        'type': 'Təmsilçilik',
+        'representation': 'Təmsilçilik',  # alias
+        'representative_name': 'Təmsilçi adı',
+        'representative_voen': 'Təmsilçi VÖEN',
+        'company_name': 'Təmsil olunan',
+        'represented_party_name': 'Təmsil olunan',  # alias
+        'company_voen': 'Təmsil olunan VÖEN',
+        'represented_party_voen': 'Təmsil olunan VÖEN',  # alias
+        'status': 'Status',
+        'result': 'Nəticə',
+    }
+
+    def __init__(self, *args, selected_columns: list | None = None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.selected_columns = [col for col in selected_columns if col] if selected_columns else None
+
+    def get_visit_duration(self, obj):
+        """Calculates formatted duration from transaction and wait time"""
+        transaction_time = obj.get('total_transaction_time') or 0
+        wait_time = obj.get('total_wait_time') or 0
+        total_seconds = transaction_time + wait_time
+        return format_time(total_seconds)
+
+    def to_representation(self, instance):
+        original_data = super().to_representation(instance)
+
+        # Build output with Azerbaijani column names, filtering by selected_columns if provided
+        azerbaijani_data = {}
+        for col, az_name in self.COLUMN_MAPPING.items():
+            # Skip aliases that aren't in original_data
+            if col not in original_data:
+                continue
+            # Include column if no selection or if column is in selection
+            if not self.selected_columns or col in self.selected_columns:
+                azerbaijani_data[az_name] = original_data.get(col, '-') or '-'
+
+        return azerbaijani_data
+
+
 class VisitSerializer(serializers.Serializer):
     first_name = serializers.CharField(max_length=100)
     last_name = serializers.CharField(max_length=100)
