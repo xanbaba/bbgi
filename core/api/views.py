@@ -1832,7 +1832,32 @@ class StatisticsApi(APIView):
         params = {}
         where = []
 
-        # ---- Filters ----
+        # ---- Global Search ----
+        search = request.query_params.get('search')
+        if search:
+            where.append("""
+                (
+                    dv.ticket_id ILIKE %(search)s
+                    OR fs.service_name ILIKE %(search)s
+                    OR vd_latest.customs_number ILIKE %(search)s
+                    OR vd_latest.type ILIKE %(search)s
+                    OR vd_latest.representative_name ILIKE %(search)s
+                    OR vd_latest.company_name ILIKE %(search)s
+                    OR vd_latest.representative_voen ILIKE %(search)s
+                    OR vd_latest.company_voen ILIKE %(search)s
+                    OR COALESCE(vs.next_action, '-') ILIKE %(search)s
+                    OR CASE fn.status
+                            WHEN 0 THEN 'Müraciət təmin edilmədi'
+                            WHEN 1 THEN 'Müraciət təmin edildi'
+                            WHEN 2 THEN 'Müraciət qismən təmin edildi'
+                            WHEN 3 THEN 'Xitam verildi'
+                            ELSE '-'
+                        END ILIKE %(search)s
+                )
+            """)
+            params['search'] = f"%{search}%"
+
+        # ---- Specific Filters ----
 
         # 1. Visit Date Range
         if request.GET.get('minDateSelected') and request.GET.get('maxDateSelected'):
@@ -1845,7 +1870,7 @@ class StatisticsApi(APIView):
             where.append("dv.ticket_id ILIKE %(ticket_id)s")
             params['ticket_id'] = f"%{request.GET['ticket_id']}%"
 
-        # 3. Service Name - filter on joined CTE
+        # 3. Service Name
         if request.GET.get('service_name'):
             where.append("fs.service_name ILIKE %(service_name)s")
             params['service_name'] = f"%{request.GET['service_name']}%"
@@ -1984,12 +2009,20 @@ class StatisticsApi(APIView):
         """
 
         # ---- Count Query ----
+        # Note: Added finish_notes and visit_status joins to count_query to support filtering by Result/Status text
         count_query = f"""
             SELECT COUNT(*)
             FROM (
                 WITH 
                 latest_declarations AS (
-                    SELECT DISTINCT ON (visit_id) visit_id
+                    SELECT DISTINCT ON (visit_id)
+                        visit_id,
+                        customs_number,
+                        type,
+                        representative_name,
+                        representative_voen,
+                        company_name,
+                        company_voen
                     FROM visits_declaration
                     ORDER BY visit_id, created_at DESC
                 ),
@@ -2000,11 +2033,36 @@ class StatisticsApi(APIView):
                     FROM fact_visit_transaction fvt
                     INNER JOIN dim_service ds ON ds.id = fvt.service_key
                     ORDER BY fvt.visit_key, fvt.create_timestamp ASC
+                ),
+                finish_notes AS (
+                    SELECT DISTINCT ON (visit_id)
+                        visit_id,
+                        status
+                    FROM stat.visits_note
+                    WHERE action = 'finish'
+                    ORDER BY visit_id, created_at ASC
+                ),
+                 visit_status AS (
+                    SELECT DISTINCT ON (visit_key)
+                        visit_key,
+                        next_action
+                    FROM (
+                         SELECT 
+                            fve.visit_key,
+                            dvet.name AS event_name,
+                            LEAD(dvet.name) OVER (PARTITION BY fve.visit_key ORDER BY fve.event_timestamp) AS next_action
+                        FROM fact_visit_events fve
+                        INNER JOIN dim_visit_event_type dvet ON dvet.id = fve.visit_event_type_key
+                        WHERE dvet.name NOT IN ('VISIT_NEXT', 'VISIT_END_TRANSACTION')
+                    ) sub
+                    WHERE event_name IN ('VISIT_CREATE', 'VISIT_CALL')
                 )
                 SELECT dv.id
                 FROM dim_visit dv
                 LEFT JOIN first_service fs ON fs.visit_key = dv.id
                 LEFT JOIN latest_declarations vd_latest ON vd_latest.visit_id = dv.origin_id::varchar
+                LEFT JOIN finish_notes fn ON fn.visit_id = dv.origin_id::varchar
+                LEFT JOIN visit_status vs ON vs.visit_key = dv.id
                 WHERE {final_where}
             ) AS sub
         """
@@ -2023,9 +2081,8 @@ class StatisticsApi(APIView):
         total = cursor.fetchone()[0]
         cursor.close()
 
-        # ---- Serialization (same output structure) ----
+        # ---- Serialization ----
         result = StatisticsApiSerializer(data, many=True).data
-
 
         return Response({
             "data": result,
