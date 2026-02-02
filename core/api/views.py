@@ -1073,11 +1073,37 @@ class Export(APIView):
         selected_father_name = request.GET.get('father_name')
         selected_columns = request.query_params.get('selected_columns')
 
+        params = {}
+        where = []
+
         cursor = get_connection()
         if data_url == "report":
             # Get filter parameters matching StatisticsApi
-            params = {}
-            where = []
+
+
+            search = request.query_params.get('search')
+            if search:
+                where.append("""
+                            (
+                                dv.ticket_id ILIKE %(search)s
+                                OR fs.service_name ILIKE %(search)s
+                                OR vd_latest.customs_number ILIKE %(search)s
+                                OR vd_latest.type ILIKE %(search)s
+                                OR vd_latest.representative_name ILIKE %(search)s
+                                OR vd_latest.company_name ILIKE %(search)s
+                                OR vd_latest.representative_voen ILIKE %(search)s
+                                OR vd_latest.company_voen ILIKE %(search)s
+                                OR COALESCE(vs.next_action, '-') ILIKE %(search)s
+                                OR CASE fn.status
+                                        WHEN 0 THEN 'Müraciət təmin edilmədi'
+                                        WHEN 1 THEN 'Müraciət təmin edildi'
+                                        WHEN 2 THEN 'Müraciət qismən təmin edildi'
+                                        WHEN 3 THEN 'Xitam verildi'
+                                        ELSE '-'
+                                    END ILIKE %(search)s
+                            )
+                        """)
+                params['search'] = f"%{search}%"
 
             # 1. Visit Date Range
             if min_date_selected and max_date_selected:
@@ -1244,67 +1270,91 @@ class Export(APIView):
             result = StatisticsExportSerializer(data, many=True, selected_columns=cols).data
 
 
+
         elif data_url == "customer-list":
+
             query = """
+
             SELECT 
+
                 dc.first_name, 
+
                 dc.last_name,
+
                 dc.father_name, 
+
                 dc.birth_date,
+
                 dc.pin,
+
                 dc.visits_count,
+
                 dc.id AS customer_id,
+
                 dc.created_at,
+
                 to_timestamp(MAX(dv.created_timestamp) / 1000.0) AS last_visited_at
+
             FROM stat.dim_visit dv
+
             LEFT JOIN stat.dim_customer dc 
+
                 ON dc.id::varchar = dv.custom_1
+
             LEFT JOIN stat.fact_visit_transaction fvt 
+
                 ON fvt.visit_key = dv.id
+
             LEFT JOIN stat.dim_branch db 
+
                 ON db.id = fvt.branch_key
+
+            LEFT JOIN visits_risk_fin vrf
+
+                    ON vrf.fin = dc.pin
+
             WHERE dv.custom_1 IS NOT NULL
+
               AND dc.id IS NOT NULL
+
                 """
 
-            pin = request.GET.get('pin')
-            name = request.GET.get('name')
-            min_created_at = request.GET.get('minCreatedAtSelected')
-            max_created_at = request.GET.get('maxCreatedAtSelected')
+            # Initialize params specifically for this block or clear the existing one if reusing
+
+            # params = {}
+
+            # NOTE: You are using 'params' defined at the top of the function.
+
+            # Be careful not to carry over params from the 'report' block if this is a shared variable.
+
+            # It is safer to initialize params = {} inside the elif block if it is independent.
+
             if selected_first_name:
-                query += f"AND dc.first_name ilike '%{selected_first_name}%'"
+                where.append("dc.first_name ILIKE %(first_name)s")
+
+                params['first_name'] = f"%{selected_first_name}%"
 
             if selected_last_name:
-                query += f"AND dc.last_name ilike '%{selected_last_name}%'"
+                where.append("dc.last_name ILIKE %(last_name)s")
 
-            if selected_father_name:
-                query += f"AND dc.father_name ilike '%{selected_father_name}%'"
+                params['last_name'] = f"%{selected_last_name}%"
 
-            if customer_id:
-                query += f"and dc.id = {customer_id} "
+            # ... Apply this pattern to all filters ...
 
-            if selected_branches:
-                query += f"AND db.id in ({','.join(selected_branches)}) "
+            if request.GET.get('riskPins') == 'true':
+                where.append("vrf.is_risk = %(risk_pins)s")
 
-            if entered_text:
-                query += f"and (lower(dc.first_name) like lower('%{entered_text}%') or lower(dc.last_name) like lower('%{entered_text}%') or lower(dc.pin) like lower('%{entered_text}%')) "
+                params["risk_pins"] = True
 
-            if pin:
-                query += f"AND dc.pin ilike '%{pin}%'"
+            if where:
+                query += " AND " + " AND ".join(where)
 
-            if name:
-                query += f"AND ds.name ilike '%{name}%'"
+            query += " GROUP BY custom_1, dc.first_name, dc.last_name, dc.father_name, dc.birth_date, dc.pin, dc.visits_count, dc.created_at, dc.id ORDER BY dc.first_name;"
 
-            if min_date_selected and max_date_selected:
-                query += f"AND dc.birth_date BETWEEN '{min_date_selected}' AND '{max_date_selected}'"
+            cursor.execute(query, params)  # Pass params here
 
-            if min_created_at and max_created_at:
-                query += f"AND dc.created_at >= '{min_created_at} 00:00:00' AND dc.created_at <= '{max_created_at} 23:59:59'"
-
-            query += f" group by custom_1,dc.first_name,dc.last_name, dc.father_name, dc.birth_date,dc.pin, dc.visits_count,dc.created_at, dc.id order by dc.first_name;"
-
-            cursor.execute(query)
             data = convert_data(cursor)
+
             result = CustomerAllExportSerializer(data, many=True, selected_columns=selected_columns.split(",")).data
 
         elif data_url == "visit-list-customer":
