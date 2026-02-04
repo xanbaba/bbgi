@@ -13,5 +13,6 @@ urlpatterns = [
     path('services',ServiceListApi.as_view()),
     path('branches',BranchListApi.as_view()),
     path('risk-fin/', RiskFinUpdateApi.as_view()),
-    path('audio-recording/', AudioRecordingApi.as_view())
+    path('audio-recording/', AudioRecordingApi.as_view()),
+    path('audio-recordings/', AudioRecordingsApi.as_view())
 ]

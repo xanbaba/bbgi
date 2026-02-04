@@ -26,7 +26,7 @@ from smbprotocol.connection import Connection
 from smbprotocol.session import Session
 from smbprotocol.tree import TreeConnect
 from smbprotocol.open import Open, CreateDisposition, ImpersonationLevel, ShareAccess, CreateOptions, \
-    FilePipePrinterAccessMask
+    FilePipePrinterAccessMask, FileInformationClass
 from smbprotocol.file_info import InfoType
 import io
 import uuid
@@ -2345,7 +2345,7 @@ class AudioRecordingApi(APIView):
         - transaction_id: Transaction ID (required)
     """
 
-    def _get_samba_file(self, date, transaction_id):
+    def _get_samba_file(self, recording_path):
         """Retrieve OPUS file from Samba server"""
         try:
             # Samba connection məlumatları
@@ -2358,7 +2358,7 @@ class AudioRecordingApi(APIView):
             print(server, share, username, password)
 
             # Fayl yolu: recordings/YYYY-MM-DD/transaction_id.opus (forward slash istifadə et)
-            file_path = f"recordings/{date}/{transaction_id}.opus"
+            file_path = recording_path
 
             logger.info(f"Samba connection: server={server}, share={share}, file_path={file_path}")
 
@@ -2401,32 +2401,291 @@ class AudioRecordingApi(APIView):
         except Exception as e:
             error_str = str(e)
             logger.error(
-                f"Samba error details: server={settings.SAMBA_SERVER_IP}, share={settings.SAMBA_SHARE_NAME}, file_path=recordings/{date}/{transaction_id}.opus, error={error_str}")
+                f"Samba error details: server={settings.SAMBA_SERVER_IP}, share={settings.SAMBA_SHARE_NAME}, file_path={recording_path}, error={error_str}")
 
             # Fayl tapılmadığında aydın mesaj ver
             if "STATUS_OBJECT_PATH_NOT_FOUND" in error_str or "path does not exist" in error_str.lower() or "0xc000003a" in error_str:
-                raise FileNotFoundError(f"Audio file not found: recordings/{date}/{transaction_id}.opus")
+                raise FileNotFoundError(f"Audio file not found: {recording_path}")
 
             raise Exception(f"Samba server error: {error_str}")
 
     def get(self, request):
         try:
-            date = request.GET.get('date')
-            transaction_id = request.GET.get('transaction_id')
+            recording_path = request.GET.get('recording_path')
 
-            if not date or not transaction_id:
+            if not recording_path:
                 return Response(
-                    {"error": "date and transaction_id parameters are required"},
+                    {"error": "recording_path parameter is required"},
                     status=status.HTTP_400_BAD_REQUEST
                 )
 
-            # Parse date format - frontend'den "13-11-2025 14:22:10" formatında gelebilir
+            # Samba serverdən OPUS faylı götür
+            try:
+                opus_data = self._get_samba_file(recording_path)
+            except FileNotFoundError as e:
+                # Fayl tapılmadığında aydın mesaj ver
+                return Response(
+                    {"error": f"Audio file not found: {recording_path}"},
+                    status=status.HTTP_404_NOT_FOUND
+                )
+            except Exception as e:
+                # Digər Samba xətaları
+                logger.error(f"Samba connection error: {str(e)}")
+                return Response(
+                    {"error": f"Samba server error: {str(e)}"},
+                    status=status.HTTP_500_INTERNAL_SERVER_ERROR
+                )
+
+            if not opus_data:
+                return Response(
+                    {"error": f"Audio file not found: {recording_path}"},
+                    status=status.HTTP_404_NOT_FOUND
+                )
+
+            logger.info(f"OPUS file retrieved successfully, size: {len(opus_data)} bytes")
+
+            # OPUS faylını birbaşa response et - şifrələmə yoxdur, decode lazım deyil
+            # Modern browsers OPUS formatını native dəstəkləyir
+            response = HttpResponse(opus_data, content_type='audio/ogg')
+            response['Content-Disposition'] = f'inline; recording_path="{recording_path}"'
+            response['Content-Length'] = len(opus_data)
+            response['Accept-Ranges'] = 'bytes'
+
+            return response
+
+        except Exception as e:
+            logger.error(f"Unexpected error: {str(e)}")
+            return Response(
+                {"error": f"Internal server error: {str(e)}"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+
+class AudioRecordingsApi(APIView):
+    """
+    API endpoint for retrieving OPUS audio recordings from Samba server.
+    Returns OPUS audio file directly (no encryption).
+
+    Parameters:
+        - date: Recording date in YYYY-MM-DD format (optional when using visit_id)
+        - transaction_id: Transaction ID (optional when using visit_id)
+        - visit_id: Visit ID to search for all recordings (optional)
+    """
+
+    def _search_files_by_visit_id(self, visit_id):
+        """Search for all OPUS files matching visit_id across all subdirectories"""
+        try:
+            server = settings.SAMBA_SERVER_IP
+            share = settings.SAMBA_SHARE_NAME
+            username = settings.SAMBA_USERNAME
+            password = settings.SAMBA_PASSWORD
+
+            logger.info(f"Searching for visit_id={visit_id} in Samba")
+
+            # Connect to Samba
+            connection = Connection(uuid.uuid4(), server, 445)
+            connection.connect()
+
+            session = Session(connection, username, password)
+            session.connect()
+
+            tree = TreeConnect(session, share)
+            tree.connect()
+
+            matching_files = []
+
+            # Open recordings directory
+            try:
+                recordings_dir = Open(tree, "recordings")
+                recordings_dir.create(
+                    ImpersonationLevel.Impersonation,
+                    FilePipePrinterAccessMask.GENERIC_READ,
+                    0,
+                    ShareAccess.FILE_SHARE_READ,
+                    CreateDisposition.FILE_OPEN,
+                    CreateOptions.FILE_DIRECTORY_FILE
+                )
+
+                # Query subdirectories (date folders)
+                date_folders = recordings_dir.query_directory("*", FileInformationClass.FILE_DIRECTORY_INFORMATION)
+                recordings_dir.close()
+
+                logger.info(f"Total items found in recordings directory: {len(date_folders)}")
+
+                # Iterate through each date folder
+                for folder_info in date_folders:
+                    raw_name = folder_info['file_name'].get_value()
+
+                    # FIX: Decode using UTF-16-LE (Standard SMB2 encoding)
+                    # We strip() to remove any potential whitespace/null padding around the name
+                    try:
+                        folder_name = raw_name.decode('utf-16-le').strip()
+                    except UnicodeDecodeError:
+                        # Fallback to utf-8 if for some reason utf-16-le fails
+                        folder_name = raw_name.decode('utf-8', errors='ignore').strip('\x00').strip()
+
+                    logger.info(f"Processing item: {repr(folder_name)}")
+
+                    # Skip . and ..
+                    if folder_name in ['.', '..']:
+                        logger.info(f"Skipping special folder: {folder_name}")
+                        continue
+
+                    # Check if it's a directory
+                    try:
+                        file_attributes = folder_info['file_attributes'].get_value()
+                        is_directory = file_attributes & 0x10  # FILE_ATTRIBUTE_DIRECTORY
+                        logger.info(f"{folder_name} - is_directory: {bool(is_directory)}")
+                        if not is_directory:
+                            logger.info(f"Skipping non-directory: {folder_name}")
+                            continue
+                    except:
+                        logger.info(f"Cannot determine if {folder_name} is directory, assuming yes")
+
+                    # Open date subfolder
+                    subfolder_path = f"recordings\\{folder_name}"
+
+                    try:
+                        logger.info(f"Attempting to open: {subfolder_path}")
+
+                        subfolder = Open(tree, subfolder_path)
+
+                        try:
+                            subfolder.create(
+                                ImpersonationLevel.Impersonation,
+                                FilePipePrinterAccessMask.GENERIC_READ,
+                                0,
+                                ShareAccess.FILE_SHARE_READ,
+                                CreateDisposition.FILE_OPEN,
+                                CreateOptions.FILE_DIRECTORY_FILE
+                            )
+                        except Exception as path_error:
+                            logger.warning(f"Failed with path {subfolder_path}, trying forward slash")
+                            subfolder.close()
+                            # Try with forward slash
+                            subfolder_path = f"recordings/{folder_name}"
+                            subfolder = Open(tree, subfolder_path)
+                            subfolder.create(
+                                ImpersonationLevel.Impersonation,
+                                FilePipePrinterAccessMask.GENERIC_READ,
+                                0,
+                                ShareAccess.FILE_SHARE_READ,
+                                CreateDisposition.FILE_OPEN,
+                                CreateOptions.FILE_DIRECTORY_FILE
+                            )
+
+                        # Query ALL files in this date folder
+                        files = subfolder.query_directory("*", FileInformationClass.FILE_DIRECTORY_INFORMATION)
+                        subfolder.close()
+
+                        logger.info(f"Found {len(files)} total files in {folder_name}")
+
+                        # Process and filter matching files
+                        for file_info in files:
+                            filename_raw = file_info['file_name'].get_value()
+
+                            # FIX: Decode filename using UTF-16-LE as well
+                            try:
+                                filename = filename_raw.decode('utf-16-le').strip()
+                            except UnicodeDecodeError:
+                                filename = filename_raw.decode('utf-8', errors='ignore').strip('\x00').strip()
+
+                            # Skip . and ..
+                            if filename in ['.', '..']:
+                                continue
+
+                            logger.info(f"File found: {filename}")
+
+                            # Check if it's an opus file
+                            if filename.endswith(".opus"):
+                                logger.info(f"OPUS file found: {filename}")
+
+                                # Check if it matches visit_id
+                                if filename.startswith(f"{visit_id}_"):
+                                    try:
+                                        # Extract timestamp from filename
+                                        timestamp_str = filename[len(f"{visit_id}_"):-5]
+
+                                        matching_files.append({
+                                            'filename': filename,
+                                            'path': f"{subfolder_path}/{filename}",
+                                            'date_folder': folder_name,
+                                            'timestamp': timestamp_str,
+                                            'size': file_info['end_of_file'].get_value()
+                                        })
+                                        logger.info(f"✓ MATCHED file: {filename}")
+                                    except Exception as e:
+                                        logger.error(f"Error parsing timestamp from {filename}: {e}")
+                                else:
+                                    logger.info(f"OPUS file does not match visit_id {visit_id}: {filename}")
+
+                    except Exception as e:
+                        logger.error(f"Error accessing folder {subfolder_path}: {e}")
+                        import traceback
+                        logger.error(traceback.format_exc())
+                        continue
+
+            except Exception as e:
+                logger.error(f"Error accessing recordings directory: {e}")
+                import traceback
+                logger.error(traceback.format_exc())
+                raise
+
+            finally:
+                # Close connections AFTER all operations are complete
+                tree.disconnect()
+                session.disconnect()
+                connection.disconnect()
+
+            # Sort by timestamp (descending - newest first)
+            matching_files.sort(key=lambda x: x['timestamp'], reverse=True)
+
+            logger.info(f"FINAL RESULT: Found {len(matching_files)} matching files for visit_id={visit_id}")
+            return matching_files
+
+        except Exception as e:
+            logger.error(f"Error searching for visit_id={visit_id}: {str(e)}")
+            import traceback
+            logger.error(traceback.format_exc())
+            raise Exception(f"Samba search error: {str(e)}")
+
+    def get(self, request):
+        try:
+            visit_id = request.GET.get('visit_id')
+            date = request.GET.get('date')
+            transaction_id = request.GET.get('transaction_id')
+
+            # Mode 1: Search by visit_id
+            if visit_id:
+                matching_files = self._search_files_by_visit_id(visit_id)
+
+                if not matching_files:
+                    return Response(
+                        {"error": f"No audio files found for visit_id={visit_id}"},
+                        status=status.HTTP_404_NOT_FOUND
+                    )
+
+                # Return list of matching files
+                return Response({
+                    "visit_id": visit_id,
+                    "count": len(matching_files),
+                    "files": matching_files
+                }, status=status.HTTP_200_OK)
+
+            # Mode 2: Get specific file by date and transaction_id (original functionality)
+            if not date or not transaction_id:
+                return Response(
+                    {"error": "Either visit_id OR (date and transaction_id) parameters are required"},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+
+            # Parse date format
             parsed_date = None
             date_formats = [
-                '%d-%m-%Y %H:%M:%S',  # 13-11-2025 14:22:10
-                '%d-%m-%Y',  # 13-11-2025
-                '%Y-%m-%d',  # 2025-11-13
-                '%Y-%m-%d %H:%M:%S',  # 2025-11-13 14:22:10
+                '%d-%m-%Y %H:%M:%S',
+                '%d-%m-%Y',
+                '%Y-%m-%d',
+                '%Y-%m-%d %H:%M:%S',
             ]
 
             for date_format in date_formats:
@@ -2443,20 +2702,17 @@ class AudioRecordingApi(APIView):
                     status=status.HTTP_400_BAD_REQUEST
                 )
 
-            # Samba'da axtarış üçün YYYY-MM-DD formatına çevir
             formatted_date = parsed_date.strftime('%Y-%m-%d')
+            file_path = f"recordings/{formatted_date}/{transaction_id}.opus"
 
-            # Samba serverdən OPUS faylı götür
             try:
-                opus_data = self._get_samba_file(formatted_date, transaction_id)
-            except FileNotFoundError as e:
-                # Fayl tapılmadığında aydın mesaj ver
+                opus_data = self._get_samba_file(file_path)
+            except FileNotFoundError:
                 return Response(
-                    {"error": f"Audio file not found: recordings/{formatted_date}/{transaction_id}.opus"},
+                    {"error": f"Audio file not found: {file_path}"},
                     status=status.HTTP_404_NOT_FOUND
                 )
             except Exception as e:
-                # Digər Samba xətaları
                 logger.error(f"Samba connection error: {str(e)}")
                 return Response(
                     {"error": f"Samba server error: {str(e)}"},
@@ -2465,14 +2721,12 @@ class AudioRecordingApi(APIView):
 
             if not opus_data:
                 return Response(
-                    {"error": f"Audio file not found: recordings/{formatted_date}/{transaction_id}.opus"},
+                    {"error": f"Audio file not found: {file_path}"},
                     status=status.HTTP_404_NOT_FOUND
                 )
 
             logger.info(f"OPUS file retrieved successfully, size: {len(opus_data)} bytes")
 
-            # OPUS faylını birbaşa response et - şifrələmə yoxdur, decode lazım deyil
-            # Modern browsers OPUS formatını native dəstəkləyir
             response = HttpResponse(opus_data, content_type='audio/ogg')
             response['Content-Disposition'] = f'inline; filename="{transaction_id}.opus"'
             response['Content-Length'] = len(opus_data)
