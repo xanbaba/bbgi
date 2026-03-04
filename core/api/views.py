@@ -1120,7 +1120,7 @@ class Export(APIView):
             # 3. Service Name
             service_name = request.GET.get('service_name')
             if service_name:
-                where.append("ds_first.name ILIKE %(service_name)s")
+                where.append("fs.service_name ILIKE %(service_name)s")
                 params['service_name'] = f"%{service_name}%"
 
             # 4. Declaration (Customs Number)
